@@ -1,0 +1,3 @@
+<resources>
+    <attr name="serviceRunningIconColor" format="color" />
+</resources>

@@ -1,0 +1,13 @@
+Commit Hash: The commit field still has the placeholder "your_commit_hash_here". You need to replace this with the actual Git commit hash that corresponds to your v1.0 release.
+You can get the correct commit hash by running the following command in your project's root directory in the terminal: git rev-parse HEAD
+
+What's Next?
+Once you've corrected the signing key format and the commit hash in your YAML file:
+1.
+Commit and Push: Commit the final changes to your acab.naiveha.upnpkino.yml file.
+2.
+Tag your Release: Ensure you have a Git tag (e.g., v1.0) on the commit you specified. If you haven't tagged it yet, you can do so with git tag v1.0 <commit-hash>.
+3.
+Push to GitHub: Push your latest commits and the new tag to your GitHub repository (git push origin main --tags).
+4.
+Submit to F-Droid: With your repository prepared, you are ready to request your app's inclusion. Go to the F-Droid RFP (Requests for Packaging) repository and create a new issue. The bot will guide you through the process.

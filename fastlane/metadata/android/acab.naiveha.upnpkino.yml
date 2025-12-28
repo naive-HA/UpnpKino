@@ -1,0 +1,31 @@
+AutoUpdateMode: None
+UpdateCheckMode: RepoManifest
+CurrentVersion: "1.0"
+CurrentVersionCode: 1
+PackageName: acab.naiveha.upnpkino
+Categories:
+  - Connectivity
+License: "Apache-2.0"
+SourceCode: "https://github.com/naive-HA/UpnpKino"
+IssueTracker: "https://github.com/naive-HA/UpnpKino/issues"
+Changelog: "https://github.com/naive-HA/UpnpKino/releases"
+Description: |
+  UPnP server for Android.
+AuthorName: naive-HA
+AuthorEmail: 0xCristian@disroot.org
+
+AllowedAPKSigningKeys:
+   - "512CCEF51AB8BA405C22F193EA1205629F7888BE8BE069B67BEA768BC0E536AC"
+
+Themes:
+  - Light
+  - Dark
+  - System
+
+Build:
+  - VerCode: 1
+    Version: "1.0"
+    commit: "your_commit_hash_here" # <-- FIX THIS
+    subdir: "app"
+    gradle:
+      - "assembleRelease"
