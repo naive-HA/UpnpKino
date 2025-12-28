@@ -1,12 +1,9 @@
 package acab.naiveha.upnpkino
 
 import android.content.Context
-import android.database.ContentObserver
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import androidx.documentfile.provider.DocumentFile
 import java.net.InetAddress
 
@@ -27,27 +24,8 @@ class Configuration(private val context: Context) {
 
     val deviceName = "UPnP Kino by naive-HA (${Build.MODEL})"
     val osName = "${System.getProperty("os.name")}/${System.getProperty("os.version")}"
-    private var onFolderReadFinished: (() -> Unit)? = null
-    private val contentObserver: ContentObserver
-
-    init {
-        val preferences = Preferences(context)
-        contentObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
-            override fun onChange(selfChange: Boolean) {
-                onChange(selfChange, null)
-            }
-            override fun onChange(selfChange: Boolean, uri: Uri?) {
-                super.onChange(selfChange, uri)
-                onFolderReadFinished?.let { readSharedFolder(it) }
-            }
-        }
-        preferences.getFolderUri()?.let { treeUri ->
-            context.contentResolver.registerContentObserver(treeUri, true, contentObserver)
-        }
-    }
 
     fun readSharedFolder(onFinished: () -> Unit) {
-        onFolderReadFinished = onFinished
         Thread {
             val preferences = Preferences(context)
             preferences.getFolderUri()?.let {
