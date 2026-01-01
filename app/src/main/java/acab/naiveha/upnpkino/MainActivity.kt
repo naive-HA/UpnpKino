@@ -14,11 +14,14 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.VibratorManager
+import android.util.DisplayMetrics
 import android.util.TypedValue
+import android.view.WindowMetrics
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -26,6 +29,7 @@ import androidx.lifecycle.lifecycleScope
 import acab.naiveha.upnpkino.databinding.ActivityMainBinding
 import kotlinx.coroutines.launch
 import java.net.NetworkInterface
+import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
 
@@ -59,6 +63,19 @@ class MainActivity : AppCompatActivity() {
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
         }
+
+        val displayMetrics = DisplayMetrics()
+        val windowMetrics: WindowMetrics = windowManager.currentWindowMetrics
+        val bounds = windowMetrics.bounds
+        displayMetrics.widthPixels = bounds.width()
+        displayMetrics.heightPixels = bounds.height()
+        val screenWidthDp = displayMetrics.widthPixels / displayMetrics.density
+        val screenHeightDp = displayMetrics.heightPixels / displayMetrics.density
+        val contentGroup = findViewById<ConstraintLayout>(R.id.content_group)
+        val params = contentGroup.layoutParams
+        params.width = (min(screenWidthDp, 410f) * displayMetrics.density).toInt()
+        params.height = (min(screenHeightDp, 870f) * displayMetrics.density).toInt()
+        contentGroup.layoutParams = params
 
         //initialize preferences
         //Preferences is static
