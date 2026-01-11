@@ -5,6 +5,7 @@ import android.util.Xml
 import org.xmlpull.v1.XmlPullParser
 import java.io.StringReader
 import kotlin.collections.get
+import kotlin.text.toIntOrNull
 
 class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
     fun parseControlServerRequest(request: String): List<String>{
@@ -119,10 +120,13 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
 </root>""".trimMargin()
     }
 
-    private fun parseServiceServerRequest(request: String): String {
-        //get search limit
-        //gt search criteria
-        var browseObject = ""
+    private fun parseServiceServerRequest(request: String): List<String> {
+        var objectID = ""
+        var browseFlag = ""
+        var filter = ""
+        var startingIndex = ""
+        var requestedCount = ""
+        var sortCriteria = ""
         val parser = Xml.newPullParser()
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
         parser.setInput(StringReader(request))
@@ -130,24 +134,41 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
         while (eventType != XmlPullParser.END_DOCUMENT) {
             if (eventType == XmlPullParser.START_TAG) {
                 if (parser.name == "ObjectID") {
-                    browseObject = parser.nextText()
+                    objectID = parser.nextText()
+                }
+                if (parser.name == "BrowseFlag") {
+                    browseFlag = parser.nextText()
+                }
+                if (parser.name == "Filter") {
+                    filter = parser.nextText()
+                }
+                if (parser.name == "StartingIndex") {
+                    startingIndex = parser.nextText()
+                }
+                if (parser.name == "RequestedCount") {
+                    requestedCount = parser.nextText()
+                }
+                if (parser.name == "SortCriteria") {
+                    sortCriteria = parser.nextText()
                 }
             }
             eventType = parser.next()
         }
-        return browseObject
+        return listOf(objectID, browseFlag, filter, startingIndex, requestedCount)
     }
 
     fun draftServiceServerControlResponse(request: String) : String? {
-        val browseObjectId = parseServiceServerRequest(request)
+        val (browseObjectId, browseFlag, filter, startingIndexStr, requestedCountStr) = parseServiceServerRequest(request)
         if (browseObjectId.isEmpty()) {
             return null
         }
+        val requestedCount = requestedCountStr.toIntOrNull() ?: 5000
         var folders = String()
         var files = String()
         if (upnpservice.configuration.sharedTree.keys.contains(browseObjectId)) {
             val objectContents = upnpservice.configuration.sharedTree[browseObjectId]?.children
             if (objectContents != null) {
+                var i = 0
                 for (id in objectContents){
                     if(upnpservice.configuration.sharedTree[id]?.type == "container"){
                         folders += """&lt;container id="$id" parentID="$browseObjectId" childCount="${upnpservice.configuration.sharedTree[id]?.size}" restricted="1" searchable="1"&gt;
@@ -166,6 +187,10 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
 &lt;res protocolInfo="http-get:*:${Constants.mimeType[fileExtension]}:*" size="${upnpservice.configuration.sharedTree[id]?.size}" duration="${upnpservice.configuration.sharedTree[id]?.duration}" resolution="${upnpservice.configuration.sharedTree[id]?.resolution}"&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getMediaServerPort()}/$id.$fileExtension&lt;/res&gt;
 &lt;/item&gt;
 """
+                    }
+                    i += 1
+                    if (i == requestedCount){
+                        break
                     }
                 }
             }
