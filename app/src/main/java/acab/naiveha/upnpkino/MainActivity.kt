@@ -11,8 +11,10 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
+import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.DisplayMetrics
 import android.util.TypedValue
@@ -39,7 +41,7 @@ class MainActivity : AppCompatActivity() {
     private val upnpService = UpnpService()
     private val requestMultiplePermissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
         if (permissions.values.any { !it }) {
-            Toast.makeText(this, "Storage and notification permissions are required.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Permissions are required for the app to function properly.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -69,6 +71,8 @@ class MainActivity : AppCompatActivity() {
         val bounds = windowMetrics.bounds
         displayMetrics.widthPixels = bounds.width()
         displayMetrics.heightPixels = bounds.height()
+        displayMetrics.density = resources.displayMetrics.density
+
         val displayDensity = max(displayMetrics.density, 1f)
         val screenWidthDp = displayMetrics.widthPixels / displayDensity
         val screenHeightDp = 0.95f * displayMetrics.heightPixels / displayDensity
@@ -96,12 +100,12 @@ class MainActivity : AppCompatActivity() {
 
         //request permission to show notifications (needed for foreground service)
         //and to read the storage (needed to stream video files)
-        val requiredPermissions = arrayOf(
-            Manifest.permission.POST_NOTIFICATIONS,
-            Manifest.permission.READ_MEDIA_IMAGES,
-            Manifest.permission.READ_MEDIA_VIDEO,
-            Manifest.permission.READ_MEDIA_AUDIO
-        )
+        val requiredPermissions = mutableListOf<String>()
+        requiredPermissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        requiredPermissions.add(Manifest.permission.READ_MEDIA_IMAGES)
+        requiredPermissions.add(Manifest.permission.READ_MEDIA_VIDEO)
+        requiredPermissions.add(Manifest.permission.READ_MEDIA_AUDIO)
+
         val missingPermissions = requiredPermissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }.toTypedArray()
@@ -118,7 +122,7 @@ class MainActivity : AppCompatActivity() {
             selectFolderLauncher.launch(null)
         }
 
-        binding.textView.text = "UPnP Kino by naiveHA ${BuildConfig.VERSION_NAME}.${BuildConfig.VERSION_CODE}\nhttps://github.com/naive-HA/UpnpKino"
+        binding.textView.text = "UPnP Kino by naiveHA ${BuildConfig.VERSION_NAME}\nhttps://github.com/naive-HA/UpnpKino"
 
         binding.textView.setOnClickListener {
             openUrl()
@@ -228,9 +232,11 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Notification permission is required to start the service.", Toast.LENGTH_LONG).show()
                 return
             }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) != PackageManager.PERMISSION_GRANTED &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            
+            val storagePermission =
+                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
+
+            if (!storagePermission) {
                 binding.button.isEnabled = true
                 binding.button2.isEnabled = true
                 binding.status.text = "Error: Storage permission not granted"
@@ -238,6 +244,7 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Storage permission is required to start the service.", Toast.LENGTH_LONG).show()
                 return
             }
+            
             if (preferences.getFolderUri() == null) {
                 binding.button.isEnabled = true
                 binding.button2.isEnabled = true
@@ -275,13 +282,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun vibrate(short: Boolean = false) {
-        val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-        val vibrator = vibratorManager.defaultVibrator
         val vibrationEffect = if (short) {
             VibrationEffect.createOneShot(100, VibrationEffect.DEFAULT_AMPLITUDE)
         } else {
             VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), -1)
         }
+
+        val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+        val vibrator = vibratorManager.defaultVibrator
         vibrator.vibrate(vibrationEffect)
     }
 }

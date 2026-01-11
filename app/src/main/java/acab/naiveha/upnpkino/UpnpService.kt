@@ -13,11 +13,13 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.VibrationEffect
+import android.os.Vibrator
 import android.os.VibratorManager
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -238,14 +240,16 @@ class UpnpService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("UPnP Kino")
             .setContentText(contentText)
             .setSmallIcon(R.drawable.ic_video)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .build()
+
+        builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+
+        return builder.build()
     }
 
     private fun updateNotification(text: String) {
@@ -254,9 +258,9 @@ class UpnpService : Service() {
     }
 
     private fun vibrate() {
+        val vibrationEffect = VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), -1)
         val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
         val vibrator = vibratorManager.defaultVibrator
-        val vibrationEffect = VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), -1)
         vibrator.vibrate(vibrationEffect)
     }
 }

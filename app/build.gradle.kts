@@ -12,10 +12,10 @@ android {
         buildConfigField("String", "APPLICATION_NAME", "\"UPnP Kino\"")
         buildConfigField("String", "APPLICATION_MANUFACTURER", "\"naive-HA\"")
         applicationId = "acab.naiveha.upnpkino"
-        minSdk = 36
+        minSdk = 35
         targetSdk = 36
         versionCode = 2
-        versionName = "1.0"
+        versionName = "2.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -95,9 +95,9 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
 <modelName>${BuildConfig.APPLICATION_NAME}</modelName>
 <modelNumber>${BuildConfig.VERSION_NAME}</modelNumber>
 <modelURL>${BuildConfig.APPLICATION_URL}</modelURL>
-<serialNumber>${BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE}</serialNumber>
+<serialNumber>${BuildConfig.VERSION_NAME}</serialNumber>
 <UDN>uuid:</UDN>
-<UPC>${BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE}</UPC>
+<UPC>${BuildConfig.VERSION_NAME}</UPC>
 <iconList>
 <icon>
 <mimetype>image/png</mimetype>
