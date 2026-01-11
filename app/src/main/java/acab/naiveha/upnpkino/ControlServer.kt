@@ -27,7 +27,9 @@ class ControlServer(private val upnpService: UpnpService) {
     fun start(onStarted: (port: Int, status: String) -> Unit) {
         job = UpnpService.events.onEach {
             if (it == "acab.naiveha.upnpkino.RepeatAliveNotification") {
-                repeatAliveNotification()
+                upnpService.configuration.readSharedFolder {
+                    repeatAliveNotification()
+                }
             }
         }.launchIn(scope)
 

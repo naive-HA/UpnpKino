@@ -119,7 +119,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
 </root>""".trimMargin()
     }
 
-    fun parseServiceServerRequest(request: String): String {
+    private fun parseServiceServerRequest(request: String): String {
         //get search limit
         //gt search criteria
         var browseObject = ""
@@ -138,7 +138,11 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
         return browseObject
     }
 
-    fun draftServiceServerControlResponse(browseObjectId: String) : String {
+    fun draftServiceServerControlResponse(request: String) : String? {
+        val browseObjectId = parseServiceServerRequest(request)
+        if (browseObjectId.isEmpty()) {
+            return null
+        }
         var folders = String()
         var files = String()
         if (upnpservice.configuration.sharedTree.keys.contains(browseObjectId)) {

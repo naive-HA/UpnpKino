@@ -59,14 +59,12 @@ open class ServiceServer(
                             "404 Not found")
                     }
                     if (payload.isNotEmpty()) {
-                        val browseObjectId = upnpservice.upnpMessages.parseServiceServerRequest(payload["postData"]!!)
-                        if (browseObjectId.isEmpty()){
-                            return newFixedLengthResponse(
-                                Response.Status.NOT_FOUND,
-                                MIME_PLAINTEXT,
-                                "404 Not found")
-                        }
-                        val response = upnpservice.upnpMessages.draftServiceServerControlResponse(browseObjectId)
+                        val response = upnpservice.upnpMessages.draftServiceServerControlResponse(payload["postData"]!!)
+                                ?: return newFixedLengthResponse(
+                                    Response.Status.NOT_FOUND,
+                                    MIME_PLAINTEXT,
+                                    "404 Not found"
+                                )
                         return newFixedLengthResponse(
                             Response.Status.OK,
                             "text/xml;charset=utf-8",

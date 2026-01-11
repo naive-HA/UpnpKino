@@ -21,7 +21,6 @@ import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -30,6 +29,7 @@ import acab.naiveha.upnpkino.databinding.ActivityMainBinding
 import kotlinx.coroutines.launch
 import java.net.NetworkInterface
 import kotlin.math.min
+import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
 
@@ -69,13 +69,13 @@ class MainActivity : AppCompatActivity() {
         val bounds = windowMetrics.bounds
         displayMetrics.widthPixels = bounds.width()
         displayMetrics.heightPixels = bounds.height()
-        val screenWidthDp = displayMetrics.widthPixels / displayMetrics.density
-        val screenHeightDp = displayMetrics.heightPixels / displayMetrics.density
-        val contentGroup = findViewById<ConstraintLayout>(R.id.content_group)
-        val params = contentGroup.layoutParams
-        params.width = (min(screenWidthDp, 410f) * displayMetrics.density).toInt()
-        params.height = (min(screenHeightDp, 870f) * displayMetrics.density).toInt()
-        contentGroup.layoutParams = params
+        val displayDensity = max(displayMetrics.density, 1f)
+        val screenWidthDp = displayMetrics.widthPixels / displayDensity
+        val screenHeightDp = 0.95f * displayMetrics.heightPixels / displayDensity
+        val params = binding.contentGroup.layoutParams
+        params.width = (min(screenWidthDp, 1150f) * displayDensity).toInt()
+        params.height = (min(screenHeightDp, 2650f) * displayDensity).toInt()
+        binding.contentGroup.layoutParams = params
 
         //initialize preferences
         //Preferences is static
@@ -135,6 +135,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.imageView.setOnClickListener {
             if (UpnpService.isRunning.value) {
+
                 lifecycleScope.launch {
                     upnpService.postEvent("acab.naiveha.upnpkino.RepeatAliveNotification")
                 }
