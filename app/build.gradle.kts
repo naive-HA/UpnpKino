@@ -38,7 +38,7 @@ android {
                 val appName = "UPnP Kino"
                 val versionName = variant.versionName
                 val versionCode = variant.versionCode
-                output.outputFileName = "${appName} v${versionName}.${versionCode}.apk"
+                output.outputFileName = "${appName} v${versionName}.apk"
             }
         }
     }
