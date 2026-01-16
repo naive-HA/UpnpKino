@@ -83,8 +83,8 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
         return """<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <root xmlns="urn:schemas-upnp-org:device-1-0">
 <specVersion>
-<major>${BuildConfig.VERSION_NAME}</major>
-<minor>${BuildConfig.VERSION_CODE}</minor>
+<major>${BuildConfig.VERSION_CODE}</major>
+<minor>${BuildConfig.VERSION_NAME}</minor>
 </specVersion>
 <device>
 <deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>

@@ -56,45 +56,45 @@ class Configuration(private val context: Context) {
 
     private fun discoverFolder(parentID: String) {
         val rootDocument = sharedTree[parentID]?.uri?.let { DocumentFile.fromTreeUri(context, it) }
-        if (rootDocument != null && rootDocument.isDirectory) {
-            for (file in rootDocument.listFiles()) {
-                if (file.name?.startsWith(".") == true) {
-                    continue
-                }
-                var childID: String
-                do {childID = generateRandomId(12)
-                } while (sharedTree.keys.contains(childID))
-                if (file.isDirectory) {
+        if (rootDocument == null || rootDocument.isDirectory == false) {
+            return
+        }
+        for (file in rootDocument.listFiles()) {
+            if (file.name?.startsWith(".") == true) {
+                continue
+            }
+            var childID: String
+            do {childID = generateRandomId(12)} while (sharedTree.keys.contains(childID))
+            if (file.isDirectory) {
+                sharedTree[childID] = metaData()
+                sharedTree[childID]?.uri = file.uri
+                sharedTree[childID]?.name = "[+] " + file.name as String
+                sharedTree[childID]?.type = "container"
+                sharedTree[parentID]?.children?.add(childID)
+                discoverFolder(childID)
+            } else {
+                val extension = file.name?.substringAfterLast('.', "")?.lowercase()
+                if (Constants.videoExtensions.contains(extension)) {
                     sharedTree[childID] = metaData()
                     sharedTree[childID]?.uri = file.uri
-                    sharedTree[childID]?.name = "[+] " + file.name as String
-                    sharedTree[childID]?.type = "container"
-                    sharedTree[parentID]?.children?.add(childID)
-                    discoverFolder(childID)
-                } else {
-                    val extension = file.name?.substringAfterLast('.', "")?.lowercase()
-                    if (Constants.videoExtensions.contains(extension)) {
-                        sharedTree[childID] = metaData()
-                        sharedTree[childID]?.uri = file.uri
-                        sharedTree[childID]?.name = file.name as String
-                        sharedTree[childID]?.type = "item"
-                        sharedTree[childID]?.size = file.length()
-                        val retriever = MediaMetadataRetriever()
-                        try {
-                            retriever.setDataSource(context, file.uri)
-                            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                            sharedTree[childID]?.duration = formatDuration(durationMs)
-                            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                            sharedTree[childID]?.resolution = if (width != null && height != null) "${width}x${height}" else "0x0"
-                        } catch (e: Exception) {
-                            sharedTree[childID]?.duration = "00:00:00"
-                            sharedTree[childID]?.resolution = "0x0"
-                        } finally {
-                            retriever.release()
-                        }
-                        sharedTree[parentID]?.children?.add(childID)
+                    sharedTree[childID]?.name = file.name as String
+                    sharedTree[childID]?.type = "item"
+                    sharedTree[childID]?.size = file.length()
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        retriever.setDataSource(context, file.uri)
+                        val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                        sharedTree[childID]?.duration = formatDuration(durationMs)
+                        val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                        val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                        sharedTree[childID]?.resolution = if (width != null && height != null) "${width}x${height}" else "0x0"
+                    } catch (e: Exception) {
+                        sharedTree[childID]?.duration = "00:00:00"
+                        sharedTree[childID]?.resolution = "0x0"
+                    } finally {
+                        retriever.release()
                     }
+                    sharedTree[parentID]?.children?.add(childID)
                 }
             }
         }

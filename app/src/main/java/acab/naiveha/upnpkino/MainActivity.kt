@@ -11,10 +11,8 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
-import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.DisplayMetrics
 import android.util.TypedValue

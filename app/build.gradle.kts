@@ -15,7 +15,9 @@ android {
         minSdk = 35
         targetSdk = 36
         versionCode = 2
-        versionName = "2.0.0"
+        var versionMajor = 0
+        var versionMinor = 1
+        versionName = "${versionCode}.${versionMajor}.${versionMinor}"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -37,7 +39,6 @@ android {
             if (variant.buildType.name == "release") {
                 val appName = "UPnP Kino"
                 val versionName = variant.versionName
-                val versionCode = variant.versionCode
                 output.outputFileName = "${appName} v${versionName}.apk"
             }
         }
