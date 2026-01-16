@@ -1,7 +1,7 @@
 UPnP Kino by naiveHA
 Uncomplicated simple: stream your video files stored on your Android phone to another phone, tablet, computer or TV set running a compatible video player, like VLC.
 
-Based on Eclipse Jetty 12 and compatible to Android 15 VanillaIceCream (API 35)
+Based on Jetty Eclipse 12 and compatible to Android 15 VanillaIceCream (API 35)
 
 How does it work?
 Make sure you are connected to WiFi, select a folder containing your video files and press "Start UPnP Kino". Then open your UPnP compatible video player, like VLC, and navigate to "Browse" on another WiFi connected phone or tablet, or "Universal Plug'n'Play" on a desktop and enjoy your videos. The app has been extensively tested with VLC but other UPnP players should work just fine.  
