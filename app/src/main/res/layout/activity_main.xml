@@ -16,7 +16,7 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <ImageView
+        <acab.naiveha.upnpkino.DoubleTapImageView
             android:id="@+id/imageView"
             android:layout_width="0dp"
             android:layout_height="308dp"

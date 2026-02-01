@@ -30,6 +30,7 @@ import kotlinx.coroutines.launch
 import java.net.NetworkInterface
 import kotlin.math.min
 import kotlin.math.max
+import androidx.core.net.toUri
 
 class MainActivity : AppCompatActivity() {
 
@@ -135,9 +136,8 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-        binding.imageView.setOnClickListener {
+        binding.imageView.setOnDoubleTapListener {
             if (UpnpService.isRunning.value) {
-
                 lifecycleScope.launch {
                     upnpService.postEvent("acab.naiveha.upnpkino.RepeatAliveNotification")
                 }
@@ -150,12 +150,26 @@ class MainActivity : AppCompatActivity() {
                 updateButtonState(isRunning)
             }
         }
+
+        lifecycleScope.launch {
+            UpnpService.events.collect { event ->
+                when (event) {
+                    "acab.naiveha.upnpkino.AnimateImageView" -> {
+                        startingAnimation.start()
+                    }
+                    "acab.naiveha.upnpkino.StopAnimateImageView" -> {
+                        startingAnimation.cancel()
+                        updateButtonState(UpnpService.isRunning.value)
+                    }
+                }
+            }
+        }
     }
 
     private fun openUrl() {
         val url = "https://github.com/naive-HA/UpnpKino"
         val intent = Intent(Intent.ACTION_VIEW)
-        intent.data = Uri.parse(url)
+        intent.data = url.toUri()
         startActivity(intent)
     }
 

@@ -5,7 +5,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 import java.io.ByteArrayInputStream
+import java.lang.Thread.sleep
 import java.net.DatagramPacket
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -171,6 +173,18 @@ class ControlServer(private val upnpService: UpnpService) {
     }
 
     private fun repeatAliveNotification(){
-        messages = upnpService.upnpMessages.draftControlServerNotifyMessage("alive")
+        messages = upnpService.upnpMessages.draftControlServerNotifyMessage("byebye")
+        scope.launch {
+            upnpService.postEvent("acab.naiveha.upnpkino.AnimateImageView")
+        }
+        upnpService.configuration.readSharedFolder {
+            Thread {
+                do{sleep(200)} while(messages.isEmpty().not())
+                messages = upnpService.upnpMessages.draftControlServerNotifyMessage("alive")
+                scope.launch {
+                    upnpService.postEvent("acab.naiveha.upnpkino.StopAnimateImageView")
+                }
+            }.start()
+        }
     }
 }
