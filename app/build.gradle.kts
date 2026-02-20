@@ -16,7 +16,7 @@ android {
         targetSdk = 36
         versionCode = 2
         var versionMajor = 0
-        var versionMinor = 2
+        var versionMinor = 3
         versionName = "${versionCode}.${versionMajor}.${versionMinor}"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -30,6 +30,13 @@ android {
                 "proguard-rules.pro"
             )
         }
+    }
+
+    dependenciesInfo {
+        // Disables dependency metadata when building APKs.
+        includeInApk = false
+        // Disables dependency metadata when building Android App Bundles.
+        includeInBundle = false
     }
 
     applicationVariants.all {
