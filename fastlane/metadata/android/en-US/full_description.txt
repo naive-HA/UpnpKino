@@ -1,0 +1,6 @@
+Uncomplicated simple: stream your video files (mp4, mkv, avi, mov, wmv, or webm) stored on your Android phone to another phone, tablet, computer or TV set running a compatible video player, like VLC.
+Based on Jetty Eclipse 12 and compatible to Android 15 VanillaIceCream (API 35)
+How does it work?
+Make sure you are connected to WiFi, select a folder containing your video files and press "Start UPnP Kino". Then open your UPnP compatible video player, like VLC, and navigate to "Browse" on another WiFi connected phone or tablet, or "Universal Plug'n'Play" on a desktop and enjoy your videos. The app has been extensively tested with VLC but other UPnP players should work just fine.
+Why not just use PlainUPnP (com.m3sv.plainupnp)?
+Well, first of all, it seems that the app has been removed from F-Droid. And, anyway, the app had a bug which made it impossible to stream video files over 2,147,483,647 bytes. Which is just over 2GB. Nowadays, most H264 encoded video files are above 2GB. "UPnP Kino" solves that problem in a fit-for-purpose way. Enjoy!
