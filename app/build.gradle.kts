@@ -14,10 +14,11 @@ android {
         applicationId = "acab.naiveha.upnpkino"
         minSdk = 35
         targetSdk = 36
-        versionCode = 2
+        versionCode = 3
+        var version = 2
         var versionMajor = 0
-        var versionMinor = 3
-        versionName = "${versionCode}.${versionMajor}.${versionMinor}"
+        var versionMinor = 4
+        versionName = "${version}.${versionMajor}.${versionMinor}"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

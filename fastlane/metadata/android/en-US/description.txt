@@ -1,1 +1,0 @@
-Based on Jetty Eclipse 12 and compatible to Android 15 VanillaIceCream (API 35)

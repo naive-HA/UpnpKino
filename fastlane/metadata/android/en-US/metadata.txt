@@ -11,6 +11,7 @@ https://github.com/naive-HA/UpnpKino.git
 ### Link to app in another app store:
 
 ### License used:
+Apache 2.0
 
 ### Category:
 Multimedia
