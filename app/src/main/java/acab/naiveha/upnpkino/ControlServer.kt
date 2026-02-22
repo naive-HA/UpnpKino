@@ -1,5 +1,6 @@
 package acab.naiveha.upnpkino
 
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -89,6 +90,8 @@ class ControlServer(private val upnpService: UpnpService) {
                         headers.add(line)
                     }
                     if (headers.isEmpty()) continue
+
+                    Log.d("upnpkino", headers.joinToString("\n"))
 
                     val responses = upnpService.upnpMessages.parseControlServerRequest(headers.joinToString("\n"))
                     for (response in responses) {

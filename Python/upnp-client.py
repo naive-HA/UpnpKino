@@ -50,7 +50,7 @@ if __name__ == '__main__':
     payload = "\r\n".join([
                 'M-SEARCH * HTTP/1.1',
                 'HOST: {}:{}'.format(*SSDP_GROUP),
-                'ST: urn:schemas-upnp-org:device:MediaServer:1',
+                'ST: ssdp:all',
                 'MAN: "ssdp:discover"',
                 'MX: 5',
                 '',
@@ -64,11 +64,13 @@ if __name__ == '__main__':
         read, write, error = select.select([sock], [], [sock], 1)
         if sock in read:
             data, addr = sock.recvfrom(1024)
+            print(data.decode())
             response = data.decode().split("\r\n")
             for line in response:
                 _line = line.split(" ")
                 if _line[0] == "LOCATION:":
-                    server_address = _line[1][0:-1]
+                    service_description = _line[1][0:]
+                    server_address = "http://" + service_description.split("/")[2]
             break
         elif sock in error:
             break
@@ -76,7 +78,7 @@ if __name__ == '__main__':
             pass # Nothing to read
     sock.close()
     print("Server address: {}".format(server_address))
-    with requests.get(url=server_address, stream=True) as r:
+    with requests.get(url=service_description, stream=True) as r:
         r.raise_for_status()
         for chunk in r.iter_content(chunk_size=8192):
             server_description = chunk.decode()
@@ -88,4 +90,3 @@ if __name__ == '__main__':
                          object_id=      0)
     postResponse = sendPostRequest(server_address=server_address, packet=packet)
     print(postResponse)
-

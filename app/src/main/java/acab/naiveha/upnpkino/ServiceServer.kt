@@ -25,10 +25,11 @@ open class ServiceServer(
         if (Method.GET == method) {
             when (session.getUri()){
                 "/" -> {
+                    val text = upnpservice.upnpMessages.draftServiceServerDescription()
                     return newFixedLengthResponse(
                         Response.Status.OK,
                         "text/xml;charset=utf-8",
-                        upnpservice.upnpMessages.draftServiceServerDescription())
+                        text)
                 }
                 "/icon" -> {
                     try {
@@ -45,6 +46,14 @@ open class ServiceServer(
                             "SERVER INTERNAL ERROR: IOException")
                     }
                 }
+                "/scpd" -> {
+                    val text = upnpservice.upnpMessages.draftScpdDescription()
+                    return newFixedLengthResponse(
+                        Response.Status.OK,
+                        "text/xml;charset=utf-8",
+                        text)
+                }
+
             }
         } else if(Method.POST == method){
             when (session.getUri()){
@@ -59,13 +68,12 @@ open class ServiceServer(
                             "404 Not found")
                     }
                     if (payload.isNotEmpty()) {
-
                         val response = upnpservice.upnpMessages.draftServiceServerControlResponse(payload["postData"]!!)
-                                ?: return newFixedLengthResponse(
-                                    Response.Status.NOT_FOUND,
-                                    MIME_PLAINTEXT,
-                                    "404 Not found"
-                                )
+                            ?: return newFixedLengthResponse(
+                                Response.Status.NOT_FOUND,
+                                MIME_PLAINTEXT,
+                                "404 Not found"
+                            )
                         return newFixedLengthResponse(
                             Response.Status.OK,
                             "text/xml;charset=utf-8",

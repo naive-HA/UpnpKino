@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.documentfile.provider.DocumentFile
 import java.net.InetAddress
+import kotlin.text.contains
 
 class Configuration(private val context: Context) {
     class metaData(){
@@ -35,7 +36,14 @@ class Configuration(private val context: Context) {
                 sharedTree["0"]?.uri = rootFolder?.uri!!
                 sharedTree["0"]?.name = rootFolder?.name!!
                 sharedTree["0"]?.type = "container"
-                discoverFolder("0")
+                var rootFolderId: String
+                do {rootFolderId = generateRandomId(12)} while (sharedTree.keys.contains(rootFolderId))
+                sharedTree["0"]?.children?.add(rootFolderId)
+                sharedTree[rootFolderId] = metaData()
+                sharedTree[rootFolderId]?.uri = rootFolder?.uri!!
+                sharedTree[rootFolderId]?.name = rootFolder?.name!!
+                sharedTree[rootFolderId]?.type = "container"
+                discoverFolder(rootFolderId)
             }
             do {
                 var foundEmptyFolder = false
