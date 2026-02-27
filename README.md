@@ -1,3 +1,5 @@
+[<img src="https://gitlab.com/IzzyOnDroid/repo/-/raw/master/assets/IzzyOnDroidButtonGreyBorder_nofont.png" height="80" alt="Get it at IzzyOnDroid">](https://apt.izzysoft.de/packages/acab.naiveha.upnpkino)
+
 # UPnP Kino by naiveHA
 Uncomplicated simple: stream your video files stored on your Android phone to another phone, tablet, computer or TV set running a compatible video player, like VLC. 
 
