@@ -77,7 +77,7 @@ class ControlServer(private val upnpService: UpnpService) {
             while (Thread.currentThread().isInterrupted.not()) {
                 try {
                     //649 bytes as per standard
-                    val buffer = ByteArray(640)
+                    val buffer = ByteArray(649)
                     val packet = DatagramPacket(buffer, buffer.size)
                     //blocking receive
                     //timeout set for 1 second
