@@ -16,7 +16,7 @@ android {
         targetSdk = 36
         versionCode = 4
         var version = 2
-        var versionMajor = 1
+        var versionMajor = 2
         var versionMinor = 0
         versionName = "${version}.${versionMajor}.${versionMinor}"
 
