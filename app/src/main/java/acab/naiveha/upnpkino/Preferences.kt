@@ -10,16 +10,27 @@ class Preferences(context: Context) {
     private val sharedPreferences = context.getSharedPreferences("UPnPStreamerPrefs", Context.MODE_PRIVATE)
 
     companion object {
-        private const val KEY_FOLDER_URI = "folder_uri"
+        private const val LOCAL_MOVIE_FOLDER_URI = "local_movie_folder_uri"
+        private const val LOCAL_MUSIC_FOLDER_URI = "local_music_folder_uri"
     }
 
-    fun saveFolderUri(uri: Uri) {
+    fun saveLocalMovieFolderUri(uri: Uri) {
         sharedPreferences.edit {
-            putString(KEY_FOLDER_URI, uri.toString())
+            putString(LOCAL_MOVIE_FOLDER_URI, uri.toString())
         }
     }
 
-    fun getFolderUri(): Uri? {
-        return sharedPreferences.getString(KEY_FOLDER_URI, null)?.toUri()
+    fun getLocalMovieFolderUri(): Uri? {
+        return sharedPreferences.getString(LOCAL_MOVIE_FOLDER_URI, null)?.toUri()
+    }
+
+    fun saveLocalMusicFolderUri(uri: Uri) {
+        sharedPreferences.edit {
+            putString(LOCAL_MUSIC_FOLDER_URI, uri.toString())
+        }
+    }
+
+    fun getLocalMusicFolderUri(): Uri? {
+        return sharedPreferences.getString(LOCAL_MUSIC_FOLDER_URI, null)?.toUri()
     }
 }

@@ -427,7 +427,6 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
                         folders += listOf(
                             "&lt;container id=\"$id\" parentID=\"$objectID\" childCount=\"${upnpservice.configuration.sharedTree[id]?.size}\" restricted=\"1\" searchable=\"1\"&gt;",
                             "&lt;dc:title&gt;${upnpservice.configuration.sharedTree[id]?.name}&lt;/dc:title&gt;",
-                            "&lt;dc:creator&gt;${BuildConfig.APPLICATION_ID}&lt;/dc:creator&gt;",
                             "&lt;upnp:writeStatus&gt;NOT_WRITABLE&lt;/upnp:writeStatus&gt;",
                             "&lt;upnp:class&gt;object.container&lt;/upnp:class&gt;",
                             "&lt;/container&gt;").joinToString("")
@@ -436,8 +435,10 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
                         files += listOf(
                             "&lt;item id=\"$id\" parentID=\"$objectID\" restricted=\"0\"&gt;",
                             "&lt;dc:title&gt;${upnpservice.configuration.sharedTree[id]?.name}&lt;/dc:title&gt;",
-                            "&lt;dc:creator&gt;${BuildConfig.APPLICATION_ID}&lt;/dc:creator&gt;",
-                            "&lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;",
+                            "&lt;dc:creator/&gt;",
+                            "&lt;upnp:class&gt;object.item.${(if (fileExtension in Constants.musicExtensions) "audioItem.musicTrack" else "videoItem")}&lt;/upnp:class&gt;",
+                            if (fileExtension in Constants.musicExtensions) "&lt;upnp:album/&gt;" else "",
+                            if (fileExtension in Constants.musicExtensions) "&lt;upnp:artist role=\"Performer\"/&gt;" else "",
                             "&lt;res protocolInfo=\"http-get:*:${Constants.mimeType[fileExtension]}:*\" size=\"${upnpservice.configuration.sharedTree[id]?.size}\" duration=\"${upnpservice.configuration.sharedTree[id]?.duration}\" resolution=\"${upnpservice.configuration.sharedTree[id]?.resolution}\"&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getMediaServerPort()}/$id.$fileExtension&lt;/res&gt;",
                             "&lt;/item&gt;").joinToString("")
                     }

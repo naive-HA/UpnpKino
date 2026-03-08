@@ -90,3 +90,11 @@ if __name__ == '__main__':
                          object_id=      0)
     postResponse = sendPostRequest(server_address=server_address, packet=packet)
     print(postResponse)
+    while True:
+        objectID = input("\n\nobject_id: ")
+        packet = postPayload(server_address= server_address, 
+                             control_url=    controlURL, 
+                             action=         "Browse", 
+                             object_id=      objectID)
+        postResponse = sendPostRequest(server_address=server_address, packet=packet)
+        print(postResponse)

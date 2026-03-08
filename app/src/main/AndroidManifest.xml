@@ -40,5 +40,4 @@
         <service android:name=".UpnpService"
             android:foregroundServiceType="connectedDevice"/>
     </application>
-
 </manifest>
