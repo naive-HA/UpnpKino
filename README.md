@@ -1,12 +1,14 @@
 [<img src="https://gitlab.com/IzzyOnDroid/repo/-/raw/master/assets/IzzyOnDroidButtonGreyBorder_nofont.png" height="80" alt="Get it at IzzyOnDroid">](https://apt.izzysoft.de/packages/acab.naiveha.upnpkino)
 
 # UPnP Kino by naiveHA
-Uncomplicated simple: stream your video files stored on your Android phone to another phone, tablet, computer or TV set running a compatible video player, like VLC. 
+Uncomplicated simple: stream your video (mp4, mkv, avi, mov, wmv, webm) and/or audio (mp3, m4a, aac, flac, wav, opus) files stored on your Android phone to another phone, tablet, computer or TV set running a compatible video player.
 
-Based on Eclipse Jetty 12 and compatible to Android 15 VanillaIceCream (API 35)
+UPnP Kino is compatible with VLC, eezUPnP and other upnp enabled players and control points.
+
+Based on Eclipse Jetty 12 and requires minimum Android 15 VanillaIceCream (API 35)
 
 # How does it work?
-Make sure you are connected to WiFi, select a folder containing your video files and press "Start UPnP Kino". Then open your UPnP compatible video player, like VLC, and navigate to "Browse" on another WiFi connected phone or tablet, or "Universal Plug'n'Play" on a desktop and enjoy your videos. The app has been extensively tested with VLC but other UPnP players should work just fine.
+Make sure you are connected to WiFi, select a folder containing your video files and/or a folder containing your audio files and press "Start UPnP Kino". Then open your UPnP compatible video player, like VLC, and navigate to "Browse" on another WiFi connected phone or tablet, or "View/Playlist/Universal Plug'n'Play" on a desktop and enjoy your videos. The app has been extensively tested with VLC but other UPnP players should work just fine.
 [![desktopVLC](https://github.com/naive-HA/UpnpKino/blob/main/desktopVLC.png)](https://github.com/naive-HA/UpnpKino/blob/main/desktopVLC.png)
 [![desktopVLC](https://github.com/naive-HA/UpnpKino/blob/main/mobileVLC.png)](https://github.com/naive-HA/UpnpKino/blob/main/mobileVLC.png)
 
