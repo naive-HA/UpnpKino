@@ -14,7 +14,7 @@ android {
         applicationId = "acab.naiveha.upnpkino"
         minSdk = 35
         targetSdk = 36
-        versionCode = 4
+        versionCode = 5
         var version = 2
         var versionMajor = 2
         var versionMinor = 1
