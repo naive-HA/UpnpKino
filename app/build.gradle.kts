@@ -17,7 +17,7 @@ android {
         versionCode = 5
         var version = 2
         var versionMajor = 2
-        var versionMinor = 1
+        var versionMinor = 2
         versionName = "${version}.${versionMajor}.${versionMinor}"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
