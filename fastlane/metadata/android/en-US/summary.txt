@@ -1,1 +1,1 @@
-Uncomplicated simple: stream your video files stored on your Android phone to another phone, tablet, computer or TV set running a compatible video player, like VLC.
+Uncomplicated simple: stream your video (mp4, mkv, avi, mov, wmv, webm) and/or audio (mp3, m4a, aac, flac, wav, opus) files stored on your Android phone to another phone, tablet, computer or TV set running a compatible video player.
