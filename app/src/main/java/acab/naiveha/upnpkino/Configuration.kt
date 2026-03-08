@@ -31,23 +31,27 @@ class Configuration(private val context: Context) {
             sharedTree["0"] = metaData()
             sharedTree["0"]?.type = "container"
             sharedTree["0"]?.children?.add("1")
-            sharedTree["0"]?.children?.add("2")
+            sharedTree["1"] = metaData()
+            sharedTree["1"]?.type = "container"
+            sharedTree["1"]?.name = "UPnP Kino"
+            sharedTree["1"]?.children?.add("11")
+            sharedTree["1"]?.children?.add("12")
             val preferences = Preferences(context)
             preferences.getLocalMovieFolderUri()?.let {
                 val rootFolder = DocumentFile.fromTreeUri(context, it)
-                sharedTree["1"] = metaData()
-                sharedTree["1"]?.uri = rootFolder?.uri!!
-                sharedTree["1"]?.name = "Movies"
-                sharedTree["1"]?.type = "container"
-                discoverFolder("1", Constants.movieExtensions)
+                sharedTree["11"] = metaData()
+                sharedTree["11"]?.uri = rootFolder?.uri!!
+                sharedTree["11"]?.name = "Movies"
+                sharedTree["11"]?.type = "container"
+                discoverFolder("11", Constants.movieExtensions)
             }
             preferences.getLocalMusicFolderUri()?.let {
                 val rootFolder = DocumentFile.fromTreeUri(context, it)
-                sharedTree["2"] = metaData()
-                sharedTree["2"]?.uri = rootFolder?.uri!!
-                sharedTree["2"]?.name = "Music"
-                sharedTree["2"]?.type = "container"
-                discoverFolder("2", Constants.musicExtensions)
+                sharedTree["12"] = metaData()
+                sharedTree["12"]?.uri = rootFolder?.uri!!
+                sharedTree["12"]?.name = "Music"
+                sharedTree["12"]?.type = "container"
+                discoverFolder("12", Constants.musicExtensions)
             }
             do {
                 var foundEmptyFolder = false
@@ -77,7 +81,7 @@ class Configuration(private val context: Context) {
             if (file.isDirectory) {
                 sharedTree[childID] = metaData()
                 sharedTree[childID]?.uri = file.uri
-                sharedTree[childID]?.name = "[+] " + file.name as String
+                sharedTree[childID]?.name = "[+] " + (file.name as String).xmlEscape()
                 sharedTree[childID]?.type = "container"
                 sharedTree[parentID]?.children?.add(childID)
                 discoverFolder(childID, fileExtensions)
@@ -89,7 +93,7 @@ class Configuration(private val context: Context) {
                 sharedTree[parentID]?.children?.add(childID)
                 sharedTree[childID] = metaData()
                 sharedTree[childID]?.uri = file.uri
-                sharedTree[childID]?.name = file.name as String
+                sharedTree[childID]?.name = (file.name as String).xmlEscape()
                 sharedTree[childID]?.type = "item"
                 sharedTree[childID]?.size = file.length()
                 sharedTree[childID]?.album = ""
@@ -103,8 +107,10 @@ class Configuration(private val context: Context) {
                     retriever.release()
                     continue
                 }
-                sharedTree[childID]?.album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM) ?: ""
-                sharedTree[childID]?.artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST) ?: ""
+                val album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM) ?: ""
+                sharedTree[childID]?.album = album.xmlEscape()
+                val artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST) ?: ""
+                sharedTree[childID]?.artist = artist.xmlEscape()
                 val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
                 sharedTree[childID]?.duration = formatDuration(durationMs)
                 val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH) ?: "0"
@@ -120,6 +126,13 @@ class Configuration(private val context: Context) {
         val minutes = (totalSeconds % 3600) / 60
         val seconds = totalSeconds % 60
         return String.format("%02d:%02d:%02d", hours, minutes, seconds)
+    }
+    private fun String.xmlEscape(): String {
+        return this.replace("&", "&amp;amp;")
+            .replace("<", "&amp;lt;")
+            .replace(">", "&amp;gt;")
+            .replace("\"", "&amp;quot;")
+            .replace("'", "&amp;apos;")
     }
     private fun generateRandomId(length: Int): String {
         val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
