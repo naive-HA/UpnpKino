@@ -109,12 +109,15 @@ class MainActivity : AppCompatActivity() {
         }
         //main button starting the foreground service
         binding.button.setOnClickListener { toggleService() }
+
         //button to select folder local movie folder
         binding.button2.setOnClickListener {
+            preferences.clearLocalMovieFolderUri()
             selectLocalMovieFolderLauncher.launch(null)
         }
         //button to select folder local music folder
         binding.button3.setOnClickListener {
+            preferences.clearLocalMusicFolderUri()
             selectLocalMusicFolderLauncher.launch(null)
         }
         binding.textView.text = "UPnP Kino by naiveHA ${BuildConfig.VERSION_NAME}\nhttps://github.com/naive-HA/UpnpKino"
