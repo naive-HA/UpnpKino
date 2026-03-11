@@ -11,7 +11,7 @@ Based on Eclipse Jetty 12 and requires minimum Android 15 VanillaIceCream (API 3
 Press the "Movies" or "Music" library icon to select the folder/folders containing your video files and/or audio files.
 <img src="https://github.com/naive-HA/UpnpKino/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/1.png" alt="UPnP Kino" height="400">  
 
-Connected to WiFi and press "Start UPnP Kino". 
+Connect to WiFi and press "Start UPnP Kino". 
 
 Then open your UPnP compatible video player, like VLC, and navigate to "Browse" on another WiFi connected phone or tablet, or "View/Playlist/Universal Plug'n'Play" on a desktop and enjoy your videos. The app has been extensively tested with VLC but other UPnP players should work just fine.
 [![desktopVLC](https://github.com/naive-HA/UpnpKino/blob/main/desktopVLC.png)](https://github.com/naive-HA/UpnpKino/blob/main/desktopVLC.png)
