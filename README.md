@@ -9,6 +9,7 @@ Based on Eclipse Jetty 12 and requires minimum Android 15 VanillaIceCream (API 3
 
 # How does it work?
 Press the "Movies" or "Music" library icon to select the folder/folders containing your video files and/or audio files.
+<img src="https://github.com/naive-HA/UpnpKino/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/1.png" alt="UPnP Kino" height="250">  
 [![mobileApp](https://github.com/naive-HA/UpnpKino/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/1.png)](https://github.com/naive-HA/UpnpKino/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/1.png =x250)
 
 Connected to WiFi and press "Start UPnP Kino". 
