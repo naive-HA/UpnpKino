@@ -1,5 +1,6 @@
 package acab.naiveha.upnpkino
 
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,29 +34,36 @@ class ControlServer(private val upnpService: UpnpService) {
             }
         }.launchIn(scope)
 
-        socket = MulticastSocket(1900)
-        socket?.reuseAddress = true
-        socket?.receiveBufferSize = 32768
-        socket?.soTimeout = 1000
-        val inetAddress = upnpService.configuration.getInetAddress()
-        if (inetAddress == null) {
-            onStarted(-1, "Error: Control server failed to start. Failed to get network interface, IP address is null")
-            return
-        }
-        networkInterface = NetworkInterface.getByInetAddress(inetAddress)
-        if (networkInterface == null) {
-            onStarted(-1, "Error: Control server failed to start. Could not find a network interface for IP address: ${inetAddress.hostAddress}")
-            return
-        }
-
-        if (!networkInterface!!.supportsMulticast()) {
-            onStarted(-1, "Error: Control server failed to start. Network interface ${networkInterface!!.displayName} does not support multicast.")
-            return
-        }
-        socketAddress = InetSocketAddress(group, 1900)
-        messages = upnpService.upnpMessages.draftControlServerNotifyMessage("alive")
         try {
+            socket = MulticastSocket(1900)
+            socket?.reuseAddress = true
+            socket?.receiveBufferSize = 32768
+            socket?.soTimeout = 1000
+            
+            val inetAddress = upnpService.configuration.getInetAddress()
+            if (inetAddress == null) {
+                onStarted(-1, "Error: Control server failed to start. Failed to get network interface, IP address is null")
+                return
+            }
+            networkInterface = NetworkInterface.getByInetAddress(inetAddress)
+            if (networkInterface == null) {
+                onStarted(-1, "Error: Control server failed to start. Could not find a network interface for IP address: ${inetAddress.hostAddress}")
+                return
+            }
+
+            if (!networkInterface!!.supportsMulticast()) {
+                onStarted(-1, "Error: Control server failed to start. Network interface ${networkInterface!!.displayName} does not support multicast.")
+                return
+            }
+            
+            // Set the network interface for outgoing multicast packets
+            socket?.setNetworkInterface(networkInterface)
+            
+            socketAddress = InetSocketAddress(group, 1900)
+            messages = upnpService.upnpMessages.draftControlServerNotifyMessage("alive")
+            
             socket?.joinGroup(socketAddress, networkInterface)
+            
             //notify the network of server's presence
             for (notification in messages) {
                 val notificationData = notification.toByteArray(Charsets.UTF_8)
@@ -69,9 +77,11 @@ class ControlServer(private val upnpService: UpnpService) {
             }
             messages = emptyList()
         } catch (e: Exception) {
+            Log.d("upnpkino", "Error: Control server failed to start. ${e.toString()}")
             onStarted(-1, "Error: Control server failed to start. ${e.toString()}")
             return
         }
+        
         controlServerThread = Thread {
             while (Thread.currentThread().isInterrupted.not()) {
                 try {
@@ -81,6 +91,11 @@ class ControlServer(private val upnpService: UpnpService) {
                     //blocking receive
                     //timeout set for 1 second
                     socket?.receive(packet)
+                    
+                    val currentInetAddress = upnpService.configuration.getInetAddress()
+                    if (packet.address == currentInetAddress || packet.address.isLoopbackAddress) {
+                        continue
+                    }
                     val inputStream = ByteArrayInputStream(packet.data, 0, packet.length)
                     val headers = mutableListOf<String>()
                     while (true) {

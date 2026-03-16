@@ -27,6 +27,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import acab.naiveha.upnpkino.databinding.ActivityMainBinding
 import kotlinx.coroutines.launch
+import java.net.Inet4Address
 import java.net.NetworkInterface
 import kotlin.math.min
 import kotlin.math.max
@@ -38,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var preferences: Preferences
     private lateinit var startingAnimation: ValueAnimator
     private val upnpService = UpnpService()
+
     private val requestMultiplePermissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
         if (permissions.values.any { !it }) {
             Toast.makeText(this, "Permissions are required for the app to function properly.", Toast.LENGTH_LONG).show()
@@ -67,6 +69,7 @@ class MainActivity : AppCompatActivity() {
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
         }
+
         val displayMetrics = DisplayMetrics()
         val windowMetrics: WindowMetrics = windowManager.currentWindowMetrics
         val bounds = windowMetrics.bounds
@@ -80,8 +83,6 @@ class MainActivity : AppCompatActivity() {
         params.width = (min(screenWidthDp, 1150f) * displayDensity).toInt()
         params.height = (min(screenHeightDp, 2650f) * displayDensity).toInt()
         binding.contentGroup.layoutParams = params
-        //initialize preferences
-        //Preferences is static
         preferences = Preferences(this)
         val darkGrey = ContextCompat.getColor(this, R.color.darker_grey)
         val white = ContextCompat.getColor(this, android.R.color.white)
@@ -94,8 +95,6 @@ class MainActivity : AppCompatActivity() {
                 binding.imageView.setColorFilter(animator.animatedValue as Int)
             }
         }
-        //request permission to show notifications (needed for foreground service)
-        //and to read the storage (needed to stream video files)
         val requiredPermissions = mutableListOf<String>()
         requiredPermissions.add(Manifest.permission.POST_NOTIFICATIONS)
         requiredPermissions.add(Manifest.permission.READ_MEDIA_IMAGES)
@@ -107,18 +106,26 @@ class MainActivity : AppCompatActivity() {
         if (missingPermissions.isNotEmpty()) {
             requestMultiplePermissionsLauncher.launch(missingPermissions)
         }
-        //main button starting the foreground service
         binding.button.setOnClickListener { toggleService() }
-
-        //button to select folder local movie folder
         binding.button2.setOnClickListener {
             preferences.clearLocalMovieFolderUri()
             selectLocalMovieFolderLauncher.launch(null)
         }
-        //button to select folder local music folder
+        binding.button2.setOnLongClickListener {
+            preferences.clearLocalMovieFolderUri()
+            vibrate()
+            Toast.makeText(this, "Video library cleared", Toast.LENGTH_SHORT).show()
+            true
+        }
         binding.button3.setOnClickListener {
             preferences.clearLocalMusicFolderUri()
             selectLocalMusicFolderLauncher.launch(null)
+        }
+        binding.button3.setOnLongClickListener {
+            preferences.clearLocalMusicFolderUri()
+            vibrate()
+            Toast.makeText(this, "Music library cleared", Toast.LENGTH_SHORT).show()
+            true
         }
         binding.textView.text = "UPnP Kino by naiveHA ${BuildConfig.VERSION_NAME}\nhttps://github.com/naive-HA/UpnpKino"
         binding.textView.setOnClickListener {
@@ -178,6 +185,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
     private fun toggleService() {
         binding.button.isEnabled = false
         disableButtons()
@@ -190,24 +198,38 @@ class MainActivity : AppCompatActivity() {
         // else
         binding.status.text = "Starting up... Please wait!"
         //if service is not running, try and start it
-        val connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network = connectivityManager.activeNetwork
-        val networkCapabilities = connectivityManager.getNetworkCapabilities(network)
         try {
-            //if Wi-Fi is not connected, it does not make sense to start
-            if (networkCapabilities == null || !networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                throw Exception("Error: WiFi not connected")
+            val connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            
+            // Search for any network with Wi-Fi transport (includes Hotspots)
+            @Suppress("DEPRECATION")
+            val wifiNetwork = connectivityManager.allNetworks.find { n ->
+                val caps = connectivityManager.getNetworkCapabilities(n)
+                caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
             }
-            val linkProperties = connectivityManager.getLinkProperties(network)
+
+            if (wifiNetwork == null) {
+                throw Exception("Error: No Wi-Fi or Hotspot network detected")
+            }
+
+            val caps = connectivityManager.getNetworkCapabilities(wifiNetwork)
+            val linkProperties = connectivityManager.getLinkProperties(wifiNetwork)
             val networkInterface = linkProperties?.let { NetworkInterface.getByName(it.interfaceName) }
-            if (networkInterface == null || !networkInterface.supportsMulticast()) {
+            
+            if (networkInterface?.supportsMulticast() == false) {
                 throw Exception("Error: Network does not support multicast")
             }
-            if (!networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)) {
-                throw Exception("Error: Network traffic may be restricted")
+            if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED) == false) {
+                throw Exception("Error: Network traffic is restricted")
             }
-            //if permission to show notifications was not granted,
-            //do not start foreground service
+            
+            val address = linkProperties?.linkAddresses?.find { it.address is Inet4Address }?.address
+            if (address == null) {
+                throw Exception("Error: Could not get IP address")
+            } else {
+                UpnpService.ipAddress = address
+            }
+
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 throw Exception("Error: Notification permission not granted")
             }
@@ -232,10 +254,10 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
             return
         }
-        //if all checks out, start the foreground service
-        //to do: pass the configuration object to service
         startingAnimation.start()
-        startService(Intent(this, UpnpService::class.java))
+        if (startService(Intent(this, UpnpService::class.java)) == null) {
+            updateButtonState(false)
+        }
     }
     private fun disableButtons(){
         binding.button2.isEnabled = false

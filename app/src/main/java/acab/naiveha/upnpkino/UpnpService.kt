@@ -13,13 +13,11 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiManager
-import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.VibrationEffect
-import android.os.Vibrator
 import android.os.VibratorManager
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -27,7 +25,6 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.net.Inet4Address
 import java.net.InetAddress
 
 class UpnpService : Service() {
@@ -37,6 +34,7 @@ class UpnpService : Service() {
         private const val CHANNEL_ID = "UpnpKinoServiceChannel"
         private val _events = MutableSharedFlow<String>()
         val events = _events.asSharedFlow()
+        var ipAddress: InetAddress? = null
     }
     private lateinit var controlServer: ControlServer
     private lateinit var serviceServer: ServiceServer
@@ -50,9 +48,6 @@ class UpnpService : Service() {
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             super.onAvailable(network)
-            getWifiIpAddress(network)?.let {
-                configuration.setInetAddress(it)
-            }
         }
 
         override fun onLost(network: Network) {
@@ -75,29 +70,18 @@ class UpnpService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        //initialize preferences
-        //Preferences is static
         preferences = Preferences(this@UpnpService)
-
-        //initialize configuration
-        //configuration is dynamic
         configuration = Configuration(this@UpnpService)
-
-        //initialize upnpMessages
         upnpMessages = UpnpMessages(this@UpnpService, this@UpnpService)
-
         connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
     }
 
     @SuppressLint("WakelockTimeout")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         _isRunning.value = false
-        try {
-            createNotificationChannel()
-            startForeground(1, createNotification("Starting servers..."))
-        } catch(e: Exception){
-            return START_NOT_STICKY
-        }
+        configuration.setInetAddress(ipAddress)
+        createNotificationChannel()
+        startForeground(1, createNotification("Starting servers..."))
         configuration.readSharedFolder {//onFinish
             val networkRequest = NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
@@ -116,7 +100,6 @@ class UpnpService : Service() {
             //to do: register a listener for changes to storage/shared folder
             //if any changes, update the configuration
             //to do: put a lock on the shared folder to prevent deletion while service is running
-            //first start the ServiceServer on a random port
             serviceServer = ServiceServer(this@UpnpService, this@UpnpService)
             serviceServer.start { servicePort, status ->
                 if (servicePort == -1) {
@@ -127,8 +110,6 @@ class UpnpService : Service() {
                     stopSelf()
                 } else {
                     configuration.setServiceServerPort(servicePort)
-
-                    //then start the media server on a random port
                     mediaServer = MediaServer(this@UpnpService, this@UpnpService)
                     mediaServer.start { mediaPort, status ->
                         if (mediaPort == -1) {
@@ -139,8 +120,6 @@ class UpnpService : Service() {
                             stopSelf()
                         } else {
                             configuration.setMediaServerPort(mediaPort)
-
-                            //finally, start the control server
                             controlServer = ControlServer(this@UpnpService)
                             controlServer.start { controlPort, status ->
                                 if (controlPort == -1) {
@@ -209,16 +188,6 @@ class UpnpService : Service() {
             Toast.makeText(this@UpnpService, "Error: Memory low. Shutting down...", Toast.LENGTH_LONG).show()
         }
         stopSelf()
-    }
-
-    private fun getWifiIpAddress(network: Network): InetAddress? {
-        val linkProperties = connectivityManager.getLinkProperties(network) ?: return null
-        for (linkAddress in linkProperties.linkAddresses) {
-            if (linkAddress.address is Inet4Address) {
-                return linkAddress.address
-            }
-        }
-        return null
     }
 
     private fun createNotificationChannel() {

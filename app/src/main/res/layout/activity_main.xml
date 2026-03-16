@@ -48,7 +48,7 @@
             android:id="@+id/button2_label"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Movies"
+            android:text="Video library"
             app:layout_constraintEnd_toEndOf="@+id/button2"
             app:layout_constraintStart_toStartOf="@+id/button2"
             app:layout_constraintTop_toBottomOf="@+id/button2" />
@@ -74,7 +74,7 @@
             android:id="@+id/button3_label"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Music"
+            android:text="Music library"
             app:layout_constraintEnd_toEndOf="@+id/button3"
             app:layout_constraintStart_toStartOf="@+id/button3"
             app:layout_constraintTop_toBottomOf="@+id/button3" />
@@ -121,7 +121,7 @@
             android:layout_marginBottom="30dp"
             android:paddingStart="15dp"
             android:paddingEnd="15dp"
-            android:text="If you like the app, remember to donate some satoshi/BTC to:\n1HwgShr1TniuBxNQwy2xAhpQaNuZhtw6sh"
+            android:text="Coffee tips go to: 1HwgShr1TniuBxNQwy2xAhpQaNuZhtw6sh"
             android:textAlignment="center"
             android:textSize="16sp"
             app:layout_constraintBottom_toBottomOf="parent"

@@ -28,7 +28,7 @@ open class ServiceServer(
                     val text = upnpservice.upnpMessages.draftServiceServerDescription()
                     return newFixedLengthResponse(
                         Response.Status.OK,
-                        "text/xml;charset=utf-8",
+                        "text/xml; charset=utf-8",
                         text)
                 }
                 "/icon" -> {
@@ -46,18 +46,24 @@ open class ServiceServer(
                             "SERVER INTERNAL ERROR: IOException")
                     }
                 }
-                "/scpd" -> {
-                    val text = upnpservice.upnpMessages.draftScpdDescription()
+                "/ContentDirectory/scpd.xml" -> {
+                    val text = upnpservice.upnpMessages.draftContentDirectoryScpdDescription()
                     return newFixedLengthResponse(
                         Response.Status.OK,
-                        "text/xml;charset=utf-8",
+                        "text/xml; charset=utf-8",
                         text)
                 }
-
+                "/ConnectionManager/scpd.xml" -> {
+                    val text = upnpservice.upnpMessages.draftConnectionManagerScpdDescription()
+                    return newFixedLengthResponse(
+                        Response.Status.OK,
+                        "text/xml; charset=utf-8",
+                        text)
+                }
             }
         } else if(Method.POST == method){
             when (session.getUri()){
-                "/control" -> {
+                "/ContentDirectory/control.xml" -> {
                     val payload = hashMapOf<String, String>()
                     try {
                         session.parseBody(payload)
@@ -68,7 +74,7 @@ open class ServiceServer(
                             "404 Not found")
                     }
                     if (payload.isNotEmpty()) {
-                        val response = upnpservice.upnpMessages.draftServiceServerControlResponse(payload["postData"]!!)
+                        val response = upnpservice.upnpMessages.draftContentDirectoryControlDescription(payload["postData"]!!)
                             ?: return newFixedLengthResponse(
                                 Response.Status.NOT_FOUND,
                                 MIME_PLAINTEXT,
@@ -76,7 +82,7 @@ open class ServiceServer(
                             )
                         return newFixedLengthResponse(
                             Response.Status.OK,
-                            "text/xml;charset=utf-8",
+                            "text/xml; charset=utf-8",
                             response)
                     }
                 }

@@ -58,6 +58,7 @@ if __name__ == '__main__':
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.sendto(payload.encode(), SSDP_GROUP)
     start = time.time()
+    server_address = None
     while True:
         if time.time() - start > TIMEOUT:
             break # timed out
@@ -68,7 +69,7 @@ if __name__ == '__main__':
             response = data.decode().split("\r\n")
             for line in response:
                 _line = line.split(" ")
-                if _line[0] == "LOCATION:":
+                if _line[0].upper() == "LOCATION:":
                     service_description = _line[1][0:]
                     server_address = "http://" + service_description.split("/")[2]
             break
@@ -77,12 +78,28 @@ if __name__ == '__main__':
         else:
             pass # Nothing to read
     sock.close()
+    if (server_address is None):
+        print("no response received")
+        exit(0)
     print("Server address: {}".format(server_address))
     with requests.get(url=service_description, stream=True) as r:
         r.raise_for_status()
         for chunk in r.iter_content(chunk_size=8192):
             server_description = chunk.decode()
-    controlURL = server_description.split("<controlURL>")[1].split("</controlURL>")[0]
+    print("Server description: ")
+    print(server_description)
+    scpdURL = server_address + "/ConnectionManager/8fdb9382-3744-5052-b806-428eac11fb57/scpd.xml"
+    with requests.get(url=scpdURL, stream=True) as r:
+        r.raise_for_status()
+        print(r.__dict__)
+        for chunk in r.iter_content(chunk_size=8192):
+            scpdXML = chunk.decode()
+    print("\n\nSCPD: ")
+    print(scpdXML)
+
+
+
+    controlURL = "/ContentDirectory/8fdb9382-3744-5052-b806-428eac11fb57/control.xml" #server_description.split("<controlURL>")[1].split("</controlURL>")[0]
     print("Server control url: {}{}".format(server_address, controlURL))
     packet = postPayload(server_address= server_address, 
                          control_url=    controlURL, 
