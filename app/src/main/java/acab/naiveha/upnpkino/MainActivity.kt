@@ -201,25 +201,24 @@ class MainActivity : AppCompatActivity() {
         try {
             val connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
             
-            // Search for any network with Wi-Fi transport (includes Hotspots)
             @Suppress("DEPRECATION")
-            val wifiNetwork = connectivityManager.allNetworks.find { n ->
-                val caps = connectivityManager.getNetworkCapabilities(n)
-                caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            val wifiNetwork = connectivityManager.allNetworks.find { network ->
+                val capabilities = connectivityManager.getNetworkCapabilities(network)
+                capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
             }
 
             if (wifiNetwork == null) {
                 throw Exception("Error: No Wi-Fi or Hotspot network detected")
             }
 
-            val caps = connectivityManager.getNetworkCapabilities(wifiNetwork)
+            val capabilities = connectivityManager.getNetworkCapabilities(wifiNetwork)
             val linkProperties = connectivityManager.getLinkProperties(wifiNetwork)
             val networkInterface = linkProperties?.let { NetworkInterface.getByName(it.interfaceName) }
             
             if (networkInterface?.supportsMulticast() == false) {
                 throw Exception("Error: Network does not support multicast")
             }
-            if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED) == false) {
+            if (capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED) == false) {
                 throw Exception("Error: Network traffic is restricted")
             }
             
