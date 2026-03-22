@@ -14,6 +14,13 @@ object Constants {
         "flac" to "audio/x-flac",
         "wav" to "audio/x-wav",
         "opus" to "audio/ogg")
+
+    val dlnaProfiles4Images = mapOf(
+        "icon_png" to "PNG_TN",
+        "large_png" to "PNG_LRG",
+        "icon_jpeg" to "JPEG_TN",
+        "small_jpeg" to "JPEG_SM",
+        "medium_jpeg" to "JPEG_MED")
     val movieExtensions = mimeType.filter { it.value.contains("video/") }.keys
     val musicExtensions = mimeType.filter { it.value.contains("audio/") }.keys
 }
