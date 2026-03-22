@@ -16,12 +16,15 @@ Then open your UPnP compatible video player, like VLC, and navigate to "Browse" 
 
 So far, UPnP Kino has been tested and confirmed working with VLC:
 [<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/desktopVLC.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/desktopVLC.png)
+
 [<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/mobileVLC.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/mobileVLC.png)
 
 eezUPnp
+
 [<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/eezUPnP.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/eezUPnP.png)
 
 and Kodi
+
 [<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/kodi.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/kodi.png)
 
 # Why not just use PlainUPnP (com.m3sv.plainupnp)?
