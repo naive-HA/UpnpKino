@@ -23,7 +23,7 @@ eezUPnp
 
 [<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/eezUPnP.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/eezUPnP.png)
 
-and Kodi
+and Kodi (in tests, it seems Kodi needs to start first and then UPnP Kino... if you cannot discover UPnP Kino, then either restart UPnP Kino or double tap the big connect icon above the start button)
 
 [<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/kodi.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/kodi.png)
 

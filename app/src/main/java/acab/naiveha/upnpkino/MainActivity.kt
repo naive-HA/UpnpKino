@@ -204,24 +204,19 @@ class MainActivity : AppCompatActivity() {
             @Suppress("DEPRECATION")
             val wifiNetwork = connectivityManager.allNetworks.find { network ->
                 val capabilities = connectivityManager.getNetworkCapabilities(network)
-                capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+                val linkProperties = connectivityManager.getLinkProperties(network)
+                val networkInterface = linkProperties?.let { NetworkInterface.getByName(it.interfaceName) }
+                
+                capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
+                networkInterface?.supportsMulticast() == true &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
             }
 
             if (wifiNetwork == null) {
                 throw Exception("Error: No Wi-Fi or Hotspot network detected")
             }
 
-            val capabilities = connectivityManager.getNetworkCapabilities(wifiNetwork)
             val linkProperties = connectivityManager.getLinkProperties(wifiNetwork)
-            val networkInterface = linkProperties?.let { NetworkInterface.getByName(it.interfaceName) }
-            
-            if (networkInterface?.supportsMulticast() == false) {
-                throw Exception("Error: Network does not support multicast")
-            }
-            if (capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED) == false) {
-                throw Exception("Error: Network traffic is restricted")
-            }
-            
             val address = linkProperties?.linkAddresses?.find { it.address is Inet4Address }?.address
             if (address == null) {
                 throw Exception("Error: Could not get IP address")
@@ -297,7 +292,7 @@ class MainActivity : AppCompatActivity() {
             VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), -1)
         }
 
-        val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+        val vibratorManager = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
         val vibrator = vibratorManager.defaultVibrator
         vibrator.vibrate(vibrationEffect)
     }

@@ -4,11 +4,31 @@ import android.content.Context
 import android.util.Xml
 import org.xmlpull.v1.XmlPullParser
 import java.io.StringReader
+import java.net.NetworkInterface
 import kotlin.collections.get
 import kotlin.collections.joinToString
 import kotlin.text.toIntOrNull
 
 class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
+    private val uuid: String by lazy {
+        "${upnpservice.configuration.generateRandomId(8)}-${upnpservice.configuration.generateRandomId(4)}-${upnpservice.configuration.generateRandomId(4)}-${upnpservice.configuration.generateRandomId(4)}-${getMacAddress() ?: "000000000000"}"
+    }
+
+    private fun getMacAddress(): String? {
+        try {
+            val inetAddress = upnpservice.configuration.getInetAddress() ?: return null
+            val networkInterface = NetworkInterface.getByInetAddress(inetAddress) ?: return null
+            val mac = networkInterface.hardwareAddress ?: return null
+            val sb = StringBuilder()
+            for (i in mac.indices) {
+                sb.append(String.format("%02X", mac[i]))
+            }
+            return sb.toString()
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
     fun parseControlServerRequest(request: String): List<String>{
         val lines = request.split("\n")
         val requestMethod = lines[0].split(" ")[0]
@@ -25,7 +45,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
             "EXT:",
             "ST: upnp:rootdevice",
-            "USN: uuid:::upnp:rootdevice",
+            "USN: uuid:$uuid::upnp:rootdevice",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
@@ -34,8 +54,8 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "CACHE-CONTROL: max-age=1800",
             "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
             "EXT:",
-            "ST: uuid:",
-            "USN: uuid:",
+            "ST: uuid:$uuid",
+            "USN: uuid:$uuid",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
@@ -45,7 +65,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
             "EXT:",
             "ST: urn:schemas-upnp-org:device:MediaServer:1",
-            "USN: uuid:::urn:schemas-upnp-org:device:MediaServer:1",
+            "USN: uuid:$uuid::urn:schemas-upnp-org:device:MediaServer:1",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
@@ -56,7 +76,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
             "EXT:",
             "ST: urn:schemas-upnp-org:service:ContentDirectory:1",
-            "USN: uuid:::urn:schemas-upnp-org:service:ContentDirectory:1",
+            "USN: uuid:$uuid::urn:schemas-upnp-org:service:ContentDirectory:1",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
@@ -72,7 +92,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "NT: upnp:rootdevice",
             "HOST: 239.255.255.250:1900",
             "NTS: ssdp:$message",
-            "USN: uuid:::upnp:rootdevice",
+            "USN: uuid:$uuid::upnp:rootdevice",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
@@ -80,10 +100,10 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "NOTIFY * HTTP/1.1",
             "CACHE-CONTROL: max-age=1800",
             "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
-            "NT: uuid:",
+            "NT: uuid:$uuid",
             "HOST: 239.255.255.250:1900",
             "NTS: ssdp:$message",
-            "USN: uuid:",
+            "USN: uuid:$uuid",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
@@ -94,7 +114,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "NT: urn:schemas-upnp-org:device:MediaServer:1",
             "HOST: 239.255.255.250:1900",
             "NTS: ssdp:$message",
-            "USN: uuid:::urn:schemas-upnp-org:device:MediaServer:1",
+            "USN: uuid:$uuid::urn:schemas-upnp-org:device:MediaServer:1",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
@@ -105,7 +125,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "NT: urn:schemas-upnp-org:service:ContentDirectory:1",
             "HOST: 239.255.255.250:1900",
             "NTS: ssdp:$message",
-            "USN: uuid:::urn:schemas-upnp-org:service:ContentDirectory:1",
+            "USN: uuid:$uuid::urn:schemas-upnp-org:service:ContentDirectory:1",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
@@ -130,8 +150,12 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "<modelNumber>${BuildConfig.VERSION_NAME}</modelNumber>",
             "<modelURL>${BuildConfig.APPLICATION_URL}</modelURL>",
             "<serialNumber>${BuildConfig.VERSION_NAME}</serialNumber>",
-            "<UDN>uuid:</UDN>",
+            "<UDN>uuid:$uuid</UDN>",
             "<UPC>${BuildConfig.VERSION_NAME}</UPC>",
+            "<dlna:X_DLNADOC xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">DMS-1.50</dlna:X_DLNADOC>",
+            "<dlna:X_DLNADOC xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">M-DMS-1.50</dlna:X_DLNADOC>",
+            "<sec:ProductCap xmlns:sec=\"http://www.sec.co.kr/dlna\">smi,getCaptionInfo.sec</sec:ProductCap>",
+            "<sec:X_ProductCap xmlns:sec=\"http://www.sec.co.kr/dlna\">smi,getCaptionInfo.sec</sec:X_ProductCap>",
             "<iconList>",
             "<icon>",
             "<mimetype>image/png</mimetype>",
@@ -155,6 +179,13 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "<SCPDURL>/ConnectionManager/scpd.xml</SCPDURL>",
             "<controlURL>/ConnectionManager/control.xml</controlURL>",
             "<eventSubURL>/ConnectionManager/event.xml</eventSubURL>",
+            "</service>",
+            "<service>",
+            "<serviceType>urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1</serviceType>",
+            "<serviceId>urn:microsoft.com:serviceId:X_MS_MediaReceiverRegistrar</serviceId>",
+            "<SCPDURL>/MediaReceiverRegistrar/scpd.xml</SCPDURL>",
+            "<controlURL>/MediaReceiverRegistrar/control.xml</controlURL>",
+            "<eventSubURL>/MediaReceiverRegistrar/event.xml</eventSubURL>",
             "</service>",
             "</serviceList>",
             "</device>",
@@ -561,6 +592,137 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "</serviceStateTable>",
             "</scpd>").joinToString("")
     }
+
+    fun draftMediaReceiverRegistrarScpdDescription(): String {
+        return listOf("<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>",
+                "<scpd xmlns=\"urn:schemas-upnp-org:service-1-0\">",
+                "<specVersion>",
+                "<major>1</major>",
+                "<minor>0</minor>",
+                "</specVersion>",
+                "<actionList>",
+                "<action>",
+                "<name>GetAuthorizationGrantedUpdateID</name>",
+                "<argumentList>",
+                "<argument>",
+                "<name>AuthorizationGrantedUpdateID</name>",
+                "<direction>out</direction>",
+                "<relatedStateVariable>AuthorizationGrantedUpdateID</relatedStateVariable>",
+                "</argument>",
+                "</argumentList>",
+                "</action>",
+                "<action>",
+                "<name>IsValidated</name>",
+                "<argumentList>",
+                "<argument>",
+                "<name>DeviceID</name>",
+                "<direction>in</direction>",
+                "<relatedStateVariable>A_ARG_TYPE_DeviceID</relatedStateVariable>",
+                "</argument>",
+                "<argument>",
+                "<name>Result</name>",
+                "<direction>out</direction>",
+                "<relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable>",
+                "</argument>",
+                "</argumentList>",
+                "</action>",
+                "<action>",
+                "<name>GetValidationSucceededUpdateID</name>",
+                "<argumentList>",
+                "<argument>",
+                "<name>ValidationSucceededUpdateID</name>",
+                "<direction>out</direction>",
+                "<relatedStateVariable>ValidationSucceededUpdateID</relatedStateVariable>",
+                "</argument>",
+                "</argumentList>",
+                "</action>",
+                "<action>",
+                "<name>GetAuthorizationDeniedUpdateID</name>",
+                "<argumentList>",
+                "<argument>",
+                "<name>AuthorizationDeniedUpdateID</name>",
+                "<direction>out</direction>",
+                "<relatedStateVariable>AuthorizationDeniedUpdateID</relatedStateVariable>",
+                "</argument>",
+                "</argumentList>",
+                "</action>",
+                "<action>",
+                "<name>IsAuthorized</name>",
+                "<argumentList>",
+                "<argument>",
+                "<name>DeviceID</name>",
+                "<direction>in</direction>",
+                "<relatedStateVariable>A_ARG_TYPE_DeviceID</relatedStateVariable>",
+                "</argument>",
+                "<argument>",
+                "<name>Result</name>",
+                "<direction>out</direction>",
+                "<relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable>",
+                "</argument>",
+                "</argumentList>",
+                "</action>",
+                "<action>",
+                "<name>GetValidationRevokedUpdateID</name>",
+                "<argumentList>",
+                "<argument>",
+                "<name>ValidationRevokedUpdateID</name>",
+                "<direction>out</direction>",
+                "<relatedStateVariable>ValidationRevokedUpdateID</relatedStateVariable>",
+                "</argument>",
+                "</argumentList>",
+                "</action>",
+                "<action>",
+                "<name>RegisterDevice</name>",
+                "<argumentList>",
+                "<argument>",
+                "<name>RegistrationReqMsg</name>",
+                "<direction>in</direction>",
+                "<relatedStateVariable>A_ARG_TYPE_RegistrationReqMsg</relatedStateVariable>",
+                "</argument>",
+                "<argument>",
+                "<name>RegistrationRespMsg</name>",
+                "<direction>out</direction>",
+                "<relatedStateVariable>A_ARG_TYPE_RegistrationRespMsg</relatedStateVariable>",
+                "</argument>",
+                "</argumentList>",
+                "</action>",
+                "</actionList>",
+                "<serviceStateTable>",
+                "<stateVariable sendEvents=\"no\">",
+                "<name>A_ARG_TYPE_RegistrationReqMsg</name>",
+                "<dataType>bin.base64</dataType>",
+                "</stateVariable>",
+                "<stateVariable sendEvents=\"no\">",
+                "<name>A_ARG_TYPE_Result</name>",
+                "<dataType>int</dataType>",
+                "</stateVariable>",
+                "<stateVariable sendEvents=\"no\">",
+                "<name>A_ARG_TYPE_DeviceID</name>",
+                "<dataType>string</dataType>",
+                "</stateVariable>",
+                "<stateVariable sendEvents=\"no\">",
+                "<name>A_ARG_TYPE_RegistrationRespMsg</name>",
+                "<dataType>bin.base64</dataType>",
+                "</stateVariable>",
+                "<stateVariable sendEvents=\"yes\"><name>ValidationRevokedUpdateID</name>",
+                "<dataType>ui4</dataType>",
+                "</stateVariable>",
+                "<stateVariable sendEvents=\"yes\">",
+                "<name>ValidationSucceededUpdateID</name>",
+                "<dataType>ui4</dataType>",
+                "</stateVariable>",
+                "<stateVariable sendEvents=\"yes\">",
+                "<name>AuthorizationDeniedUpdateID</name>",
+                "<dataType>ui4</dataType>",
+                "</stateVariable>",
+                "<stateVariable sendEvents=\"yes\">",
+                "<name>AuthorizationGrantedUpdateID</name>",
+                "<dataType>ui4</dataType>",
+                "</stateVariable>",
+                "</serviceStateTable>",
+                "</scpd>").joinToString("")
+    }
+
     private fun parseServiceServerRequest(request: String): String{
         val parser = Xml.newPullParser()
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
@@ -615,40 +777,29 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             eventType = parser.next()
         }
 
-        var folders = String()
-        var files = String()
+        var metadata = String()
         var totalMatches = 0
-        if (upnpservice.configuration.sharedTree.keys.contains(objectID)) {
+        if (browseFlag == "BrowseDirectChildren" && upnpservice.configuration.sharedTree.keys.contains(objectID)) {
             val objectContents = upnpservice.configuration.sharedTree[objectID]?.children
             if (objectContents != null) {
                 for (id in objectContents){
-                    if(upnpservice.configuration.sharedTree[id]?.type == "container"){
-                        folders += listOf(
-                            "&lt;container id=\"$id\" parentID=\"$objectID\" childCount=\"${upnpservice.configuration.sharedTree[id]?.size}\" restricted=\"1\" searchable=\"1\"&gt;",
-                            "&lt;dc:title&gt;${upnpservice.configuration.sharedTree[id]?.name}&lt;/dc:title&gt;",
-                            "&lt;upnp:writeStatus&gt;NOT_WRITABLE&lt;/upnp:writeStatus&gt;",
-                            "&lt;upnp:class&gt;object.container&lt;/upnp:class&gt;",
-                            "&lt;/container&gt;").joinToString("")
-                    } else {
-                        val fileExtension = upnpservice.configuration.sharedTree[id]?.name?.substringAfterLast('.', "")?.lowercase()
-                        files += listOf(
-                            "&lt;item id=\"$id\" parentID=\"$objectID\" restricted=\"0\"&gt;",
-                            "&lt;dc:title&gt;${upnpservice.configuration.sharedTree[id]?.name}&lt;/dc:title&gt;",
-                            "&lt;dc:creator/&gt;",
-                            "&lt;upnp:class&gt;object.item.${(if (fileExtension in Constants.musicExtensions) "audioItem.musicTrack" else "videoItem")}&lt;/upnp:class&gt;",
-                            if (fileExtension in Constants.musicExtensions) "&lt;upnp:album/&gt;" else "",
-                            if (fileExtension in Constants.musicExtensions) "&lt;upnp:artist role=\"Performer\"/&gt;" else "",
-                            "&lt;res protocolInfo=\"http-get:*:${Constants.mimeType[fileExtension]}:*\" size=\"${upnpservice.configuration.sharedTree[id]?.size}\" duration=\"${upnpservice.configuration.sharedTree[id]?.duration}\" resolution=\"${upnpservice.configuration.sharedTree[id]?.resolution}\"&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getMediaServerPort()}/$id.$fileExtension&lt;/res&gt;",
-                            "&lt;/item&gt;").joinToString("")
+                    if(upnpservice.configuration.sharedTree[objectID]?.type == "container" && totalMatches != requestedCount){
+                        metadata += metadataValues(id)
+                        totalMatches += 1
                     }
-                    totalMatches += 1
-                    if (totalMatches == requestedCount){
-                        break
+                }
+                for (id in objectContents){
+                    if(upnpservice.configuration.sharedTree[objectID]?.type != "container" && totalMatches != requestedCount){
+                        metadata += metadataValues(id)
+                        totalMatches += 1
                     }
                 }
             }
+        } else if (browseFlag == "BrowseMetadata") {
+            metadata += metadataValues(objectID)
+            totalMatches = 1
         }
-        if (folders.isNotEmpty() or files.isNotEmpty()){
+        if (totalMatches > 0){
             return listOf(
                 "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>",
                 "<s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">",
@@ -656,7 +807,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
                 "<u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\">",
                 "<Result>",
                 "&lt;DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:sec=\"http://www.sec.co.kr/\"&gt;",
-                "${folders + files}&lt;/DIDL-Lite&gt;",
+                "${metadata}&lt;/DIDL-Lite&gt;",
                 "</Result>",
                 "<NumberReturned>$totalMatches</NumberReturned>",
                 "<TotalMatches>$totalMatches</TotalMatches>",
@@ -681,5 +832,32 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "</s:Fault>",
             "</s:Body>",
             "</s:Envelope>").joinToString("")
+    }
+
+    private fun metadataValues(objectID: String): String{
+        var metadata = String()
+        if(upnpservice.configuration.sharedTree[objectID]?.type == "container"){
+            metadata += listOf(
+                "&lt;container id=\"$objectID\" parentID=\"$objectID\" childCount=\"${upnpservice.configuration.sharedTree[objectID]?.size}\" restricted=\"1\" searchable=\"1\"&gt;",
+                "&lt;dc:title&gt;${upnpservice.configuration.sharedTree[objectID]?.name}&lt;/dc:title&gt;",
+                "&lt;upnp:writeStatus&gt;NOT_WRITABLE&lt;/upnp:writeStatus&gt;",
+                "&lt;upnp:class&gt;object.container&lt;/upnp:class&gt;",
+                "&lt;/container&gt;").joinToString("")
+        } else {
+            val fileExtension = upnpservice.configuration.sharedTree[objectID]?.name?.substringAfterLast('.', "")?.lowercase()
+            metadata += listOf(
+                "&lt;item id=\"$objectID\" parentID=\"$objectID\" restricted=\"0\"&gt;",
+                "&lt;dc:title&gt;${upnpservice.configuration.sharedTree[objectID]?.name}&lt;/dc:title&gt;",
+                "&lt;dc:creator/&gt;",
+                "&lt;upnp:class&gt;object.item.${(if (fileExtension in Constants.musicExtensions) "audioItem.musicTrack" else "videoItem")}&lt;/upnp:class&gt;",
+                "&lt;upnp:longDescription/&gt;",
+                "&lt;upnp:albumArtURI&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getMediaServerPort()}/icon&lt;/upnp:albumArtURI&gt;",
+                "&lt;upnp:albumArtURI xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\" dlna:profileID=\"PNG_TN\"&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getMediaServerPort()}/icon&lt;/upnp:albumArtURI&gt;",
+                if (fileExtension in Constants.musicExtensions) "&lt;upnp:album/&gt;" else "",
+                if (fileExtension in Constants.musicExtensions) "&lt;upnp:artist role=\"Performer\"/&gt;" else "",
+                "&lt;res protocolInfo=\"http-get:*:${Constants.mimeType[fileExtension]}:*\" size=\"${upnpservice.configuration.sharedTree[objectID]?.size}\" duration=\"${upnpservice.configuration.sharedTree[objectID]?.duration}\" resolution=\"${upnpservice.configuration.sharedTree[objectID]?.resolution}\"&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getMediaServerPort()}/$objectID.$fileExtension&lt;/res&gt;",
+                "&lt;/item&gt;").joinToString("")
+        }
+        return metadata
     }
 }

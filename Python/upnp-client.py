@@ -4,12 +4,9 @@ import select
 import requests
 
 if __name__ == '__main__':
-    SSDP_GROUP = ("239.255.255.250", 1900)
-    TIMEOUT = 10.0
-
-    def postPayload(server_address, control_url, action, object_id):
+    def postPayload(server_address, control_url, browseFlag, action, object_id):
         data = {"ObjectID"      : object_id, 
-                "BrowseFlag"    : "BrowseDirectChildren",
+                "BrowseFlag"    : browseFlag,
                 "Filter"        : "*",
                 "StartingIndex" : 0,
                 "RequestedCount": 5000,
@@ -46,6 +43,13 @@ if __name__ == '__main__':
         finally:
             sock.close()
         return data
+
+#################################################################################################
+#################################################################################################
+#################################################################################################
+    
+    SSDP_GROUP = ("239.255.255.250", 1900)
+    TIMEOUT = 10.0
 
     payload = "\r\n".join([
                 'M-SEARCH * HTTP/1.1',
@@ -88,30 +92,64 @@ if __name__ == '__main__':
             server_description = chunk.decode()
     print("Server description: ")
     print(server_description)
-    scpdURL = server_address + "/ConnectionManager/8fdb9382-3744-5052-b806-428eac11fb57/scpd.xml"
-    with requests.get(url=scpdURL, stream=True) as r:
+    ContentDirectoryscpdURL = server_description.split("ContentDirectory:1")[1].split("</SCPDURL>")[0].split("<SCPDURL>")[1]
+    print(ContentDirectoryscpdURL)
+    ConnectionManagerscpdURL = server_description.split("ConnectionManager:1")[1].split("</SCPDURL>")[0].split("<SCPDURL>")[1]
+    print(ConnectionManagerscpdURL)
+    MediaReceiverRegistrarscpdURL = server_description.split("X_MS_MediaReceiverRegistrar:1")[1].split("</SCPDURL>")[0].split("<SCPDURL>")[1]
+    print(MediaReceiverRegistrarscpdURL)
+    with requests.get(url=server_address + ContentDirectoryscpdURL, stream=True) as r:
         r.raise_for_status()
-        print(r.__dict__)
+        #print(r.__dict__)
         for chunk in r.iter_content(chunk_size=8192):
             scpdXML = chunk.decode()
-    print("\n\nSCPD: ")
+    print("\n\nContentDirectory SCPD: ")
     print(scpdXML)
 
+    with requests.get(url=server_address + ConnectionManagerscpdURL, stream=True) as r:
+        r.raise_for_status()
+        #print(r.__dict__)
+        for chunk in r.iter_content(chunk_size=8192):
+            scpdXML = chunk.decode()
+    print("\n\nConnectionManager SCPD: ")
+    print(scpdXML)
 
+    with requests.get(url=server_address + MediaReceiverRegistrarscpdURL, stream=True) as r:
+        r.raise_for_status()
+        #print(r.__dict__)
+        for chunk in r.iter_content(chunk_size=8192):
+            scpdXML = chunk.decode()
+    print("\n\nMediaReceiverRegistrar SCPD: ")
+    print(scpdXML)
 
-    controlURL = "/ContentDirectory/8fdb9382-3744-5052-b806-428eac11fb57/control.xml" #server_description.split("<controlURL>")[1].split("</controlURL>")[0]
-    print("Server control url: {}{}".format(server_address, controlURL))
+    ContentDirectoryControlURL = server_description.split("ContentDirectory:1")[1].split("</controlURL>")[0].split("<controlURL>")[1]
+    print(ContentDirectoryControlURL)
+    ConnectionManagerControlURL = server_description.split("ConnectionManager:1")[1].split("</controlURL>")[0].split("<controlURL>")[1]
+    print(ConnectionManagerControlURL)
+    MediaReceiverRegistrarControlURL = server_description.split("X_MS_MediaReceiverRegistrar:1")[1].split("</controlURL>")[0].split("<controlURL>")[1]
+    print(MediaReceiverRegistrarControlURL)
+
+    print("Server control url: {}{}".format(server_address, ContentDirectoryControlURL))
     packet = postPayload(server_address= server_address, 
-                         control_url=    controlURL, 
+                         control_url=    ContentDirectoryControlURL, 
+                         browseFlag =    "BrowseDirectChildren",
                          action=         "Browse", 
                          object_id=      0)
     postResponse = sendPostRequest(server_address=server_address, packet=packet)
     print(postResponse)
     while True:
-        objectID = input("\n\nobject_id: ")
+        print("\n\n")
+        print("BrowseDirectChildren: 1")
+        print("BrowseMetadata: 2")
+        if input("Select browse action: ") == 1:
+            browseFlag = "BrowseDirectChildren"
+        else: 
+            browseFlag = "BrowseMetadata"
+        objectID = input("Type object_id: ")
         packet = postPayload(server_address= server_address, 
-                             control_url=    controlURL, 
-                             action=         "Browse", 
-                             object_id=      objectID)
+                            control_url=    ContentDirectoryControlURL, 
+                            browseFlag =    browseFlag,
+                            action=         "Browse", 
+                            object_id=      objectID)
         postResponse = sendPostRequest(server_address=server_address, packet=packet)
         print(postResponse)

@@ -33,7 +33,7 @@ class Configuration(private val context: Context) {
             sharedTree["0"]?.children?.add("1")
             sharedTree["1"] = metaData()
             sharedTree["1"]?.type = "container"
-            sharedTree["1"]?.name = "UPnP Kino"
+            sharedTree["1"]?.name = "Library"
             sharedTree["1"]?.children?.add("11")
             sharedTree["1"]?.children?.add("12")
             val preferences = Preferences(context)
@@ -134,7 +134,7 @@ class Configuration(private val context: Context) {
             .replace("\"", "&amp;quot;")
             .replace("'", "&amp;apos;")
     }
-    private fun generateRandomId(length: Int): String {
+    fun generateRandomId(length: Int): String {
         val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
         return (1..length).map { allowedChars.random() }.joinToString("")
     }
