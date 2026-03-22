@@ -783,13 +783,13 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             val objectContents = upnpservice.configuration.sharedTree[objectID]?.children
             if (objectContents != null) {
                 for (id in objectContents){
-                    if(upnpservice.configuration.sharedTree[objectID]?.type == "container" && totalMatches != requestedCount){
+                    if(upnpservice.configuration.sharedTree[id]?.type == "container" && totalMatches != requestedCount){
                         metadata += metadataValues(id)
                         totalMatches += 1
                     }
                 }
                 for (id in objectContents){
-                    if(upnpservice.configuration.sharedTree[objectID]?.type != "container" && totalMatches != requestedCount){
+                    if(upnpservice.configuration.sharedTree[id]?.type != "container" && totalMatches != requestedCount){
                         metadata += metadataValues(id)
                         totalMatches += 1
                     }
