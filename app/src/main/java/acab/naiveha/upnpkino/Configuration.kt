@@ -17,6 +17,7 @@ class Configuration(private val context: Context) {
         var artist: String = ""
         var duration: String = ""
         var resolution: String = ""
+        var parent: String = ""
         var children: MutableList<String> = mutableListOf()
     }
     var sharedTree: MutableMap<String, metaData> = emptyMap<String, metaData>().toMutableMap()
@@ -34,6 +35,7 @@ class Configuration(private val context: Context) {
             sharedTree["1"] = metaData()
             sharedTree["1"]?.type = "container"
             sharedTree["1"]?.name = "Library"
+            sharedTree["1"]?.parent = "0"
             sharedTree["1"]?.children?.add("11")
             sharedTree["1"]?.children?.add("12")
             val preferences = Preferences(context)
@@ -43,6 +45,7 @@ class Configuration(private val context: Context) {
                 sharedTree["11"]?.uri = rootFolder?.uri!!
                 sharedTree["11"]?.name = "Movies"
                 sharedTree["11"]?.type = "container"
+                sharedTree["11"]?.parent = "1"
                 discoverFolder("11", Constants.movieExtensions)
             }
             preferences.getLocalMusicFolderUri()?.let {
@@ -51,6 +54,7 @@ class Configuration(private val context: Context) {
                 sharedTree["12"]?.uri = rootFolder?.uri!!
                 sharedTree["12"]?.name = "Music"
                 sharedTree["12"]?.type = "container"
+                sharedTree["12"]?.parent = "1"
                 discoverFolder("12", Constants.musicExtensions)
             }
             do {
@@ -83,6 +87,7 @@ class Configuration(private val context: Context) {
                 sharedTree[childID]?.uri = file.uri
                 sharedTree[childID]?.name = "[+] " + (file.name as String).xmlEscape()
                 sharedTree[childID]?.type = "container"
+                sharedTree[childID]?.parent = parentID
                 sharedTree[parentID]?.children?.add(childID)
                 discoverFolder(childID, fileExtensions)
                 continue
@@ -95,6 +100,7 @@ class Configuration(private val context: Context) {
                 sharedTree[childID]?.uri = file.uri
                 sharedTree[childID]?.name = (file.name as String).xmlEscape()
                 sharedTree[childID]?.type = "item"
+                sharedTree[childID]?.parent = parentID
                 sharedTree[childID]?.size = file.length()
                 sharedTree[childID]?.album = ""
                 sharedTree[childID]?.artist = ""

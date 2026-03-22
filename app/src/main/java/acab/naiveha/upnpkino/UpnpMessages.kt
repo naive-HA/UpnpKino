@@ -784,19 +784,19 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             if (objectContents != null) {
                 for (id in objectContents){
                     if(upnpservice.configuration.sharedTree[id]?.type == "container" && totalMatches != requestedCount){
-                        metadata += metadataValues(id)
+                        metadata += metadataValues(id, objectID)
                         totalMatches += 1
                     }
                 }
                 for (id in objectContents){
                     if(upnpservice.configuration.sharedTree[id]?.type != "container" && totalMatches != requestedCount){
-                        metadata += metadataValues(id)
+                        metadata += metadataValues(id, objectID)
                         totalMatches += 1
                     }
                 }
             }
         } else if (browseFlag == "BrowseMetadata") {
-            metadata += metadataValues(objectID)
+            metadata += metadataValues(objectID, upnpservice.configuration.sharedTree[objectID]?.parent!!)
             totalMatches = 1
         }
         if (totalMatches > 0){
@@ -834,11 +834,11 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "</s:Envelope>").joinToString("")
     }
 
-    private fun metadataValues(objectID: String): String{
+    private fun metadataValues(objectID: String, parentID: String): String{
         var metadata = String()
         if(upnpservice.configuration.sharedTree[objectID]?.type == "container"){
             metadata += listOf(
-                "&lt;container id=\"$objectID\" parentID=\"$objectID\" childCount=\"${upnpservice.configuration.sharedTree[objectID]?.size}\" restricted=\"1\" searchable=\"1\"&gt;",
+                "&lt;container id=\"$objectID\" parentID=\"$parentID\" childCount=\"${upnpservice.configuration.sharedTree[objectID]?.children?.size}\" restricted=\"1\" searchable=\"1\"&gt;",
                 "&lt;dc:title&gt;${upnpservice.configuration.sharedTree[objectID]?.name}&lt;/dc:title&gt;",
                 "&lt;upnp:writeStatus&gt;NOT_WRITABLE&lt;/upnp:writeStatus&gt;",
                 "&lt;upnp:class&gt;object.container&lt;/upnp:class&gt;",
@@ -846,7 +846,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
         } else {
             val fileExtension = upnpservice.configuration.sharedTree[objectID]?.name?.substringAfterLast('.', "")?.lowercase()
             metadata += listOf(
-                "&lt;item id=\"$objectID\" parentID=\"$objectID\" restricted=\"0\"&gt;",
+                "&lt;item id=\"$objectID\" parentID=\"$parentID\" restricted=\"0\"&gt;",
                 "&lt;dc:title&gt;${upnpservice.configuration.sharedTree[objectID]?.name}&lt;/dc:title&gt;",
                 "&lt;dc:creator/&gt;",
                 "&lt;upnp:class&gt;object.item.${(if (fileExtension in Constants.musicExtensions) "audioItem.musicTrack" else "videoItem")}&lt;/upnp:class&gt;",
