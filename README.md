@@ -13,8 +13,16 @@ Press the "Movies" or "Music" library icon to select the folder/folders containi
 <img src="https://github.com/naive-HA/UpnpKino/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/1.png" alt="UPnP Kino" height="400">  
 
 Then open your UPnP compatible video player, like VLC, and navigate to "Browse" on another WiFi connected phone or tablet, or "View/Playlist/Universal Plug'n'Play" on a desktop and enjoy your videos. The app has been extensively tested with VLC but other UPnP players should work just fine.
-[![desktopVLC](https://github.com/naive-HA/UpnpKino/blob/main/desktopVLC.png)](https://github.com/naive-HA/UpnpKino/blob/main/desktopVLC.png)
-[![desktopVLC](https://github.com/naive-HA/UpnpKino/blob/main/mobileVLC.png)](https://github.com/naive-HA/UpnpKino/blob/main/mobileVLC.png)
+
+So far, UPnP Kino has been tested and confirmed working with VLC:
+[<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/desktopVLC.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/desktopVLC.png)
+[<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/mobileVLC.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/mobileVLC.png)
+
+eezUPnp
+[<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/eezUPnP.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/eezUPnP.png)
+
+and Kodi
+[<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/kodi.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/kodi.png)
 
 # Why not just use PlainUPnP (com.m3sv.plainupnp)?
 Well, first of all, it seems that the app has been removed from F-Droid. And, anyway, the app had a bug which made it impossible to stream video files over 2,147,483,647 bytes. Which is just over 2GB. Nowadays, most H264 encoded video files are above 2GB. "UPnP Kino" solves that problem in a fit-for-purpose way. Enjoy!
