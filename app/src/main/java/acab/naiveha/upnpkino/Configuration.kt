@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.documentfile.provider.DocumentFile
 import java.net.InetAddress
+import java.net.NetworkInterface
 
 class Configuration(private val context: Context) {
     class metaData(){
@@ -22,10 +23,26 @@ class Configuration(private val context: Context) {
     }
     var sharedTree: MutableMap<String, metaData> = emptyMap<String, metaData>().toMutableMap()
     var ip: InetAddress? = null
-    var servicePort: Int = 0
-    var mediaPort: Int = 0
+    var httpPort: Int = 0
     val deviceName = "UPnP Kino by naive-HA (${Build.MODEL})"
     val osName = "${System.getProperty("os.name")}/${System.getProperty("os.version")}"
+    val uuid: String by lazy {
+        "a3a21c1b-1312-acab-a3a2-${getMacAddress() ?: "000000000000"}"
+    }
+    private fun getMacAddress(): String? {
+        try {
+            val inetAddress = getInetAddress() ?: return null
+            val networkInterface = NetworkInterface.getByInetAddress(inetAddress) ?: return null
+            val mac = networkInterface.hardwareAddress ?: return null // this returns null. check
+            val sb = StringBuilder()
+            for (i in mac.indices) {
+                sb.append(String.format("%02X", mac[i]))
+            }
+            return sb.toString()
+        } catch (e: Exception) {
+            return null
+        }
+    }
     fun readSharedFolder(onFinished: () -> Unit) {
         Thread {
             sharedTree.clear()
@@ -144,17 +161,11 @@ class Configuration(private val context: Context) {
         val allowedChars = ('A'..'Z') + ('a'..'z') + ('0'..'9')
         return (1..length).map { allowedChars.random() }.joinToString("")
     }
-    fun setServiceServerPort(port: Int) {
-        servicePort = port
+    fun setHttpServerPort(port: Int) {
+        httpPort = port
     }
-    fun getServiceServerPort(): Int {
-        return servicePort
-    }
-    fun setMediaServerPort(port: Int) {
-        mediaPort = port
-    }
-    fun getMediaServerPort(): Int {
-        return mediaPort
+    fun getHttpServerPort(): Int {
+        return httpPort
     }
     fun setInetAddress(ipAddress: InetAddress?) {
         ip = ipAddress

@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
 }
 
 android {
@@ -15,9 +14,9 @@ android {
         minSdk = 35
         targetSdk = 36
         versionCode = 10
-        var version = 3
-        var versionMajor = 0
-        var versionMinor = 0
+        val version = 3
+        val versionMajor = 0
+        val versionMinor = 0
         versionName = "${version}.${versionMajor}.${versionMinor}"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -34,34 +33,48 @@ android {
     }
 
     dependenciesInfo {
-        // Disables dependency metadata when building APKs.
         includeInApk = false
-        // Disables dependency metadata when building Android App Bundles.
         includeInBundle = false
-    }
-
-    applicationVariants.all {
-        val variant = this
-        variant.outputs.all {
-            val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
-            if (variant.buildType.name == "release") {
-                val appName = "UPnP Kino"
-                val versionName = variant.versionName
-                output.outputFileName = "${appName} v${versionName}.apk"
-            }
-        }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
+
     buildFeatures {
         viewBinding = true
         buildConfig = true
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        val variantName = variant.name.replaceFirstChar { it.uppercase() }
+
+        val copyTask = tasks.register<Copy>("copyRenamed${variantName}Apk") {
+            from(variant.artifacts.get(com.android.build.api.artifact.SingleArtifact.APK))
+            include("*.apk")
+            into(layout.buildDirectory.dir("../release"))
+            rename { _ ->
+                "UPnP.Kino.v${android.defaultConfig.versionName}.apk"
+            }
+            duplicatesStrategy = DuplicatesStrategy.INCLUDE
+        }
+
+        tasks.matching { it.name == "assemble$variantName" }.configureEach {
+            finalizedBy(copyTask)
+        }
+
+        tasks.matching { it.name == "create${variantName}ApkListingFileRedirect" }.configureEach {
+            dependsOn(copyTask)
+        }
     }
 }
 
@@ -71,9 +84,9 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.activity)
     implementation(libs.androidx.constraintlayout)
-    implementation("org.eclipse.jetty:jetty-server:12.1.5")
-    implementation("org.eclipse.jetty.ee10:jetty-ee10-servlet:12.1.5")
-    implementation("androidx.documentfile:documentfile:1.1.0")
+    implementation(libs.jetty.server)
+    implementation(libs.jetty.ee10.servlet)
+    implementation(libs.androidx.documentfile)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -4,31 +4,11 @@ import android.content.Context
 import android.util.Xml
 import org.xmlpull.v1.XmlPullParser
 import java.io.StringReader
-import java.net.NetworkInterface
 import kotlin.collections.get
 import kotlin.collections.joinToString
 import kotlin.text.toIntOrNull
 
 class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
-    private val uuid: String by lazy {
-        "${upnpservice.configuration.generateRandomId(8)}-${upnpservice.configuration.generateRandomId(4)}-${upnpservice.configuration.generateRandomId(4)}-${upnpservice.configuration.generateRandomId(4)}-${getMacAddress() ?: "000000000000"}"
-    }
-
-    private fun getMacAddress(): String? {
-        try {
-            val inetAddress = upnpservice.configuration.getInetAddress() ?: return null
-            val networkInterface = NetworkInterface.getByInetAddress(inetAddress) ?: return null
-            val mac = networkInterface.hardwareAddress ?: return null
-            val sb = StringBuilder()
-            for (i in mac.indices) {
-                sb.append(String.format("%02X", mac[i]))
-            }
-            return sb.toString()
-        } catch (e: Exception) {
-            return null
-        }
-    }
-
     fun parseControlServerRequest(request: String): List<String>{
         val lines = request.split("\n")
         val requestMethod = lines[0].split(" ")[0]
@@ -38,34 +18,60 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
         return emptyList()
     }
 
+    fun isXmlValid(xml: String): Boolean {
+        // XML 1.0 specifications for illegal characters.
+        // Valid characters are: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+        fun isIllegal(c: Char): Boolean {
+            val code = c.code
+            return !((code == 0x9) || (code == 0xA) || (code == 0xD) ||
+                    (code in 0x20..0xD7FF) ||
+                    (code in 0xE000..0xFFFD) ||
+                    (code in 0x10000..0x10FFFF))
+        }
+        if (xml.any { isIllegal(it) }) return false
+
+        return try {
+            val parser = Xml.newPullParser()
+            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
+            parser.setInput(StringReader(xml))
+            var eventType = parser.eventType
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                eventType = parser.next()
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     fun draftControlServerMSearchResponse() : List<String>{
         val rootDevice = listOf(
             "HTTP/1.1 200 OK",
             "CACHE-CONTROL: max-age=1800",
-            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
+            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/",
             "EXT:",
             "ST: upnp:rootdevice",
-            "USN: uuid:$uuid::upnp:rootdevice",
+            "USN: uuid:${upnpservice.configuration.uuid}::upnp:rootdevice",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
         val blank = listOf(
             "HTTP/1.1 200 OK",
             "CACHE-CONTROL: max-age=1800",
-            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
+            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/",
             "EXT:",
-            "ST: uuid:$uuid",
-            "USN: uuid:$uuid",
+            "ST: uuid:${upnpservice.configuration.uuid}",
+            "USN: uuid:${upnpservice.configuration.uuid}",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
         val mediaServer = listOf(
             "HTTP/1.1 200 OK",
             "CACHE-CONTROL: max-age=1800",
-            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
+            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/",
             "EXT:",
             "ST: urn:schemas-upnp-org:device:MediaServer:1",
-            "USN: uuid:$uuid::urn:schemas-upnp-org:device:MediaServer:1",
+            "USN: uuid:${upnpservice.configuration.uuid}::urn:schemas-upnp-org:device:MediaServer:1",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
@@ -73,10 +79,10 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
         val contentDirectory = listOf(
             "HTTP/1.1 200 OK",
             "CACHE-CONTROL: max-age=1800",
-            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
+            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/",
             "EXT:",
             "ST: urn:schemas-upnp-org:service:ContentDirectory:1",
-            "USN: uuid:$uuid::urn:schemas-upnp-org:service:ContentDirectory:1",
+            "USN: uuid:${upnpservice.configuration.uuid}::urn:schemas-upnp-org:service:ContentDirectory:1",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
@@ -88,50 +94,50 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
         val rootDevice = listOf(
             "NOTIFY * HTTP/1.1",
             "CACHE-CONTROL: max-age=1800",
-            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
+            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/",
             "NT: upnp:rootdevice",
             "HOST: 239.255.255.250:1900",
             "NTS: ssdp:$message",
-            "USN: uuid:$uuid::upnp:rootdevice",
+            "USN: uuid:${upnpservice.configuration.uuid}::upnp:rootdevice",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
         val blank = listOf(
             "NOTIFY * HTTP/1.1",
             "CACHE-CONTROL: max-age=1800",
-            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
-            "NT: uuid:$uuid",
+            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/",
+            "NT: uuid:${upnpservice.configuration.uuid}",
             "HOST: 239.255.255.250:1900",
             "NTS: ssdp:$message",
-            "USN: uuid:$uuid",
+            "USN: uuid:${upnpservice.configuration.uuid}",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
         val mediaServer = listOf(
             "NOTIFY * HTTP/1.1",
             "CACHE-CONTROL: max-age=1800",
-            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
+            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/",
             "NT: urn:schemas-upnp-org:device:MediaServer:1",
             "HOST: 239.255.255.250:1900",
             "NTS: ssdp:$message",
-            "USN: uuid:$uuid::urn:schemas-upnp-org:device:MediaServer:1",
+            "USN: uuid:${upnpservice.configuration.uuid}::urn:schemas-upnp-org:device:MediaServer:1",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
         val contentDirectory = listOf(
             "NOTIFY * HTTP/1.1",
             "CACHE-CONTROL: max-age=1800",
-            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getServiceServerPort()}/",
+            "LOCATION: http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/",
             "NT: urn:schemas-upnp-org:service:ContentDirectory:1",
             "HOST: 239.255.255.250:1900",
             "NTS: ssdp:$message",
-            "USN: uuid:$uuid::urn:schemas-upnp-org:service:ContentDirectory:1",
+            "USN: uuid:${upnpservice.configuration.uuid}::urn:schemas-upnp-org:service:ContentDirectory:1",
             "SERVER: ${upnpservice.configuration.osName} UPnP/1.0 ${context.getString(R.string.app_name)}/${BuildConfig.VERSION_NAME}",
             "",
             "").joinToString("\r\n")
         return listOf(rootDevice, blank, mediaServer, contentDirectory)
     }
-//to do : add 256X256px icon
+    //to do : add 256X256px icon
     fun draftServiceServerDescription() : String{
         return listOf(
             "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>",
@@ -150,7 +156,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "<modelNumber>${BuildConfig.VERSION_NAME}</modelNumber>",
             "<modelURL>${BuildConfig.APPLICATION_URL}</modelURL>",
             "<serialNumber>${BuildConfig.VERSION_NAME}</serialNumber>",
-            "<UDN>uuid:$uuid</UDN>",
+            "<UDN>uuid:${upnpservice.configuration.uuid}</UDN>",
             "<UPC>${BuildConfig.VERSION_NAME}</UPC>",
             "<dlna:X_DLNADOC xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">DMS-1.50</dlna:X_DLNADOC>",
             "<dlna:X_DLNADOC xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">M-DMS-1.50</dlna:X_DLNADOC>",
@@ -169,23 +175,23 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "<service>",
             "<serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>",
             "<serviceId>urn:upnp-org:serviceId:ContentDirectory</serviceId>",
-            "<SCPDURL>/ContentDirectory/scpd.xml</SCPDURL>",
-            "<controlURL>/ContentDirectory/control.xml</controlURL>",
-            "<eventSubURL>/ContentDirectory/event.xml</eventSubURL>",
+            "<SCPDURL>/${upnpservice.configuration.uuid}/ContentDirectory/scpd.xml</SCPDURL>",
+            "<controlURL>/${upnpservice.configuration.uuid}/ContentDirectory/control.xml</controlURL>",
+            "<eventSubURL>/${upnpservice.configuration.uuid}/ContentDirectory/event.xml</eventSubURL>",
             "</service>",
             "<service>",
             "<serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>",
             "<serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>",
-            "<SCPDURL>/ConnectionManager/scpd.xml</SCPDURL>",
-            "<controlURL>/ConnectionManager/control.xml</controlURL>",
-            "<eventSubURL>/ConnectionManager/event.xml</eventSubURL>",
+            "<SCPDURL>/${upnpservice.configuration.uuid}/ConnectionManager/scpd.xml</SCPDURL>",
+            "<controlURL>/${upnpservice.configuration.uuid}/ConnectionManager/control.xml</controlURL>",
+            "<eventSubURL>/${upnpservice.configuration.uuid}/ConnectionManager/event.xml</eventSubURL>",
             "</service>",
             "<service>",
             "<serviceType>urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1</serviceType>",
             "<serviceId>urn:microsoft.com:serviceId:X_MS_MediaReceiverRegistrar</serviceId>",
-            "<SCPDURL>/MediaReceiverRegistrar/scpd.xml</SCPDURL>",
-            "<controlURL>/MediaReceiverRegistrar/control.xml</controlURL>",
-            "<eventSubURL>/MediaReceiverRegistrar/event.xml</eventSubURL>",
+            "<SCPDURL>/${upnpservice.configuration.uuid}/MediaReceiverRegistrar/scpd.xml</SCPDURL>",
+            "<controlURL>/${upnpservice.configuration.uuid}/MediaReceiverRegistrar/control.xml</controlURL>",
+            "<eventSubURL>/${upnpservice.configuration.uuid}/MediaReceiverRegistrar/event.xml</eventSubURL>",
             "</service>",
             "</serviceList>",
             "</device>",
@@ -426,7 +432,7 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
             "</serviceStateTable>",
             "</scpd>").joinToString("")
     }
-    fun draftContentDirectoryControlDescription(request: String) : String? {
+    fun draftContentDirectoryControlDescription(request: String) : String {
         when (parseServiceServerRequest(request)){
             "Browse" -> {
                 return draftBrowseResponse(request)
@@ -851,11 +857,11 @@ class UpnpMessages(val context: Context, val upnpservice: UpnpService) {
                 "&lt;dc:creator/&gt;",
                 "&lt;upnp:class&gt;object.item.${(if (fileExtension in Constants.musicExtensions) "audioItem.musicTrack" else "videoItem")}&lt;/upnp:class&gt;",
                 "&lt;upnp:longDescription/&gt;",
-                "&lt;upnp:albumArtURI&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getMediaServerPort()}/icon&lt;/upnp:albumArtURI&gt;",
-                "&lt;upnp:albumArtURI xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\" dlna:profileID=\"PNG_TN\"&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getMediaServerPort()}/icon&lt;/upnp:albumArtURI&gt;",
+                "&lt;upnp:albumArtURI&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/${upnpservice.configuration.uuid}/icon&lt;/upnp:albumArtURI&gt;",
+                "&lt;upnp:albumArtURI xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\" dlna:profileID=\"PNG_TN\"&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/${upnpservice.configuration.uuid}/icon&lt;/upnp:albumArtURI&gt;",
                 if (fileExtension in Constants.musicExtensions) "&lt;upnp:album/&gt;" else "",
                 if (fileExtension in Constants.musicExtensions) "&lt;upnp:artist role=\"Performer\"/&gt;" else "",
-                "&lt;res protocolInfo=\"http-get:*:${Constants.mimeType[fileExtension]}:*\" size=\"${upnpservice.configuration.sharedTree[objectID]?.size}\" duration=\"${upnpservice.configuration.sharedTree[objectID]?.duration}\" resolution=\"${upnpservice.configuration.sharedTree[objectID]?.resolution}\"&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getMediaServerPort()}/$objectID.$fileExtension&lt;/res&gt;",
+                "&lt;res protocolInfo=\"http-get:*:${Constants.mimeType[fileExtension]}:*\" size=\"${upnpservice.configuration.sharedTree[objectID]?.size}\" duration=\"${upnpservice.configuration.sharedTree[objectID]?.duration}\" resolution=\"${upnpservice.configuration.sharedTree[objectID]?.resolution}\"&gt;http://${upnpservice.configuration.getIpAddress()}:${upnpservice.configuration.getHttpServerPort()}/${upnpservice.configuration.uuid}/$objectID.$fileExtension&lt;/res&gt;",
                 "&lt;/item&gt;").joinToString("")
         }
         return metadata

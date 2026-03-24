@@ -5,7 +5,6 @@ import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager

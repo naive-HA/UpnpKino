@@ -36,9 +36,8 @@ class UpnpService : Service() {
         val events = _events.asSharedFlow()
         var ipAddress: InetAddress? = null
     }
-    private lateinit var controlServer: ControlServer
-    private lateinit var serviceServer: ServiceServer
-    private lateinit var mediaServer: MediaServer
+    private lateinit var multicastServer: MulticastServer
+    private lateinit var httpServer: HttpServer
     lateinit var configuration: Configuration
     lateinit var preferences: Preferences
     lateinit var upnpMessages: UpnpMessages
@@ -87,7 +86,7 @@ class UpnpService : Service() {
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .build()
             connectivityManager.registerNetworkCallback(networkRequest, networkCallback)
-            //acquire locks
+
             val powerManager = getSystemService(POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "UpnpStreamer::WakeLock")
             wakeLock?.acquire()
@@ -100,40 +99,28 @@ class UpnpService : Service() {
             //to do: register a listener for changes to storage/shared folder
             //if any changes, update the configuration
             //to do: put a lock on the shared folder to prevent deletion while service is running
-            serviceServer = ServiceServer(this@UpnpService, this@UpnpService)
-            serviceServer.start { servicePort, status ->
-                if (servicePort == -1) {
+            httpServer = HttpServer(this@UpnpService, this@UpnpService)
+            httpServer.start { httpPort, status ->
+                if (httpPort == -1) {
                     vibrate()
                     Handler(Looper.getMainLooper()).post {
                         Toast.makeText(this@UpnpService, status, Toast.LENGTH_LONG).show()
                     }
                     stopSelf()
                 } else {
-                    configuration.setServiceServerPort(servicePort)
-                    mediaServer = MediaServer(this@UpnpService, this@UpnpService)
-                    mediaServer.start { mediaPort, status ->
-                        if (mediaPort == -1) {
+                    configuration.setHttpServerPort(httpPort)
+                    multicastServer = MulticastServer(this@UpnpService)
+                    multicastServer.start { multicastPort, status ->
+                        if (multicastPort == -1) {
                             vibrate()
                             Handler(Looper.getMainLooper()).post {
                                 Toast.makeText(this@UpnpService, status, Toast.LENGTH_LONG).show()
                             }
                             stopSelf()
                         } else {
-                            configuration.setMediaServerPort(mediaPort)
-                            controlServer = ControlServer(this@UpnpService)
-                            controlServer.start { controlPort, status ->
-                                if (controlPort == -1) {
-                                    vibrate()
-                                    Handler(Looper.getMainLooper()).post {
-                                        Toast.makeText(this@UpnpService, status, Toast.LENGTH_LONG).show()
-                                    }
-                                    stopSelf()
-                                } else {
-                                    val ipAddress = configuration.getIpAddress()
-                                    updateNotification("Running on $ipAddress")
-                                    _isRunning.value = true
-                                }
-                            }
+                            val ipAddress = configuration.getIpAddress()
+                            updateNotification("Running on $ipAddress")
+                            _isRunning.value = true
                         }
                     }
                 }
@@ -144,14 +131,11 @@ class UpnpService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (this::mediaServer.isInitialized) {
-            mediaServer.stop()
+        if (this::httpServer.isInitialized) {
+            httpServer.stop()
         }
-        if (this::serviceServer.isInitialized) {
-            serviceServer.stop()
-        }
-        if (this::controlServer.isInitialized) {
-            controlServer.stop()
+        if (this::multicastServer.isInitialized) {
+            multicastServer.stop()
         }
 
         //remove locks
@@ -228,7 +212,7 @@ class UpnpService : Service() {
 
     private fun vibrate() {
         val vibrationEffect = VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), -1)
-        val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+        val vibratorManager = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
         val vibrator = vibratorManager.defaultVibrator
         vibrator.vibrate(vibrationEffect)
     }

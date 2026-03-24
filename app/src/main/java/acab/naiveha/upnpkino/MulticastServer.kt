@@ -16,7 +16,7 @@ import java.net.MulticastSocket
 import java.net.NetworkInterface
 import java.net.SocketTimeoutException
 
-class ControlServer(private val upnpService: UpnpService) {
+class MulticastServer(private val upnpService: UpnpService) {
 
     private var socket: MulticastSocket? = null
     private var socketAddress: InetSocketAddress? = null
@@ -35,8 +35,9 @@ class ControlServer(private val upnpService: UpnpService) {
         }.launchIn(scope)
 
         try {
-            socket = MulticastSocket(1900)
+            socket = MulticastSocket(null)
             socket?.reuseAddress = true
+            socket?.bind(InetSocketAddress(1900))
             socket?.receiveBufferSize = 32768
             socket?.soTimeout = 1000
             
@@ -85,8 +86,7 @@ class ControlServer(private val upnpService: UpnpService) {
         controlServerThread = Thread {
             while (Thread.currentThread().isInterrupted.not()) {
                 try {
-                    //649 bytes as per standard
-                    val buffer = ByteArray(649)
+                    val buffer = ByteArray(4096)
                     val packet = DatagramPacket(buffer, buffer.size)
                     //blocking receive
                     //timeout set for 1 second
