@@ -1,3 +1,32 @@
 <resources>
     <string name="app_name">UPnP Kino</string>
+    <string name="btc_address">1HwgShr1TniuBxNQwy2xAhpQaNuZhtw6sh</string>
+    <string name="tips_message">Coffee tips go to: %1$s</string>
+    <string name="copied_to_clipboard">Copied to clipboard: %1$s</string>
+    <string name="first_fragment_label">First Fragment</string>
+    <string name="second_fragment_label">Second Fragment</string>
+    <string name="next">Next</string>
+    <string name="previous">Previous</string>
+    <string name="start_chromecast">Start Chromecast</string>
+    <string name="chromecast_info_title">Compatibility Info</string>
+    <string name="chromecast_info_message">Not all video formats can be natively played by a Chromecast device. Some video formats need transcoding into a supported codec. Other need transcoding just the audio track. As of now, UPnP Kino cannot transcode video or audio. As such, those media files are not displayed as available for streaming. In a future version, compatibility might be extended. Remember to donate to support development</string>
+    <string name="dlna_info_title">DLNA Info</string>
+    <string name="dlna_info_message">UPnP/DLNA playback depends on the capabilities of the rendering device. Some devices may not support all formats or may have limitations with certain codecs. Ensure your DLNA renderer is on the same network and correctly configured.</string>
+    <string name="info_content_description">Show compatibility information</string>
+    <string name="menu_licenses">Licenses</string>
+    <string name="licenses_details">UPnP Kino by naiveHA is licensed under Apache-2.0\nSource code is found at: https://github.com/naive-HA/UpnpKino\nThe license is found at: https://github.com/naive-HA/UpnpKino/blob/main/LICENSE\n\nDLNA (Digital Living Network Alliance) and the DLNA logo are trademarks of the Digital Living Network Alliance. This project is not affiliated with, endorsed by, or sponsored by the Digital Living Network Alliance. All references to DLNA are for descriptive and interoperability purposes only. No copyright or trademark claims are made to DLNA or any related intellectual property.\n\nChromecast is a trademark of Google LLC. This project is not affiliated with, endorsed by, or sponsored by Google LLC. All references to Chromecast are for descriptive and interoperability purposes only. No copyright or trademark claims are made to Chromecast or any related Google intellectual property.\n\nThis software uses libraries from the FFmpeg project under the LGPLv2.1. This project is not affiliated with, endorsed by, or sponsored by FFmpeg. All references to FFmpeg are for descriptive and interoperability purposes only. No copyright or trademark claims are made to FFmpeg or any related intellectual property. FFmpeg source code can be found at: https://ffmpeg.org/download.html\n\n...\n\nThis software uses zlib licensed \"as-is\". This project is not affiliated with, endorsed by, or sponsored by zlib. All references to zlib are for descriptive and interoperability purposes only. No copyright or trademark claims are made to zlib or any related intellectual property. zlib source code can be found at: https://www.zlib.net\n\nThis software uses FreeType licensed FTL. This project is not affiliated with, endorsed by, or sponsored by FreeType. All references to FreeType are for descriptive and interoperability purposes only. No copyright or trademark claims are made to FreeType or any related intellectual property. FreeType source code can be found at: https://freetype.org\n\nThis software uses HarfBuzz licensed under the so-called "Old MIT" license. This project is not affiliated with, endorsed by, or sponsored by HarfBuzz. All references to HarfBuzz are for descriptive and interoperability purposes only. No copyright or trademark claims are made to HarfBuzz or any related intellectual property. HarfBuzz source code can be found at: https://github.com/harfbuzz/harfbuzz\n\nThis software uses GNU FriBidi licensed under LGPL-2.1 license. This project is not affiliated with, endorsed by, or sponsored by GNU FriBidi. All references to GNU FriBidi are for descriptive and interoperability purposes only. No copyright or trademark claims are made to GNU FriBidi or any related intellectual property. GNU FriBidi source code can be found at: https://github.com/fribidi/fribidi\n\nThis software uses libass licensed under ISC license. This project is not affiliated with, endorsed by, or sponsored by libass. All references to libass are for descriptive and interoperability purposes only. No copyright or trademark claims are made to libass or any related intellectual property. libass source code can be found at: https://github.com/libass/libass</string>
+
+    <string name="version_info">UPnP Kino by naiveHA %1$s\nhttps://github.com/naive-HA/UpnpKino</string>
+    <string name="stop_upnp_kino">Stop UPnP Kino</string>
+    <string name="start_upnp_kino">Start UPnP Kino</string>
+    <string name="status_not_running">UPnP Kino is not running\nStart UPnP Kino to discover devices</string>
+    <string name="status_not_discovered">Devices not discovered yet\nStart a search</string>
+    <string name="status_starting">UPnP Kino is starting\nPlease wait...</string>
+    <string name="status_searching">Searching for devices\nPlease wait...</string>
+    <string name="status_no_device_selected">No device selected\nSearch again</string>
+    <string name="status_no_devices_found">No devices found\nSearch again</string>
+    <string name="status_tap_to_select">Tap to select media file\n</string>
+    <string name="status_error">Something went wrong\nCheck your device and try again</string>
+    <string name="device_info_format">%1$s\n%2$s</string>
+    <string name="default_time">00:00:00</string>
 </resources>

@@ -4,20 +4,30 @@ plugins {
 
 android {
     namespace = "acab.naiveha.upnpkino"
-    compileSdk = 36
+    compileSdk = 37
+
+    packaging {
+        jniLibs.useLegacyPackaging = true
+    }
 
     defaultConfig {
         buildConfigField("String", "APPLICATION_URL", "\"https://github.com/naive-HA\"")
         buildConfigField("String", "APPLICATION_NAME", "\"UPnP Kino\"")
         buildConfigField("String", "APPLICATION_MANUFACTURER", "\"naive-HA\"")
         applicationId = "acab.naiveha.upnpkino"
-        minSdk = 35
-        targetSdk = 36
-        versionCode = 10
-        val version = 3
+        minSdk = 26
+        //noinspection EditedTargetSdkVersion
+        targetSdk = 37
+        versionCode = 11
+        val version = 4
         val versionMajor = 0
         val versionMinor = 0
         versionName = "${version}.${versionMajor}.${versionMinor}"
+
+        ndk {
+            //noinspection ChromeOsAbiSupport
+            abiFilters += listOf("arm64-v8a")
+        }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -25,6 +35,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -38,8 +49,9 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     buildFeatures {
@@ -50,7 +62,7 @@ android {
 
 kotlin {
     compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
     }
 }
 
@@ -58,12 +70,15 @@ androidComponents {
     onVariants { variant ->
         val variantName = variant.name.replaceFirstChar { it.uppercase() }
 
+        val apkVersionName = android.defaultConfig.versionName
+        val releaseDir = layout.buildDirectory.dir("../release")
+
         val copyTask = tasks.register<Copy>("copyRenamed${variantName}Apk") {
             from(variant.artifacts.get(com.android.build.api.artifact.SingleArtifact.APK))
             include("*.apk")
-            into(layout.buildDirectory.dir("../release"))
+            into(releaseDir)
             rename { _ ->
-                "UPnP.Kino.v${android.defaultConfig.versionName}.apk"
+                "UPnP.Kino.v${apkVersionName}.apk"
             }
             duplicatesStrategy = DuplicatesStrategy.INCLUDE
         }
@@ -79,15 +94,21 @@ androidComponents {
 }
 
 dependencies {
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
+    implementation(project(":ponyfill"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation(libs.androidx.activity)
     implementation(libs.androidx.constraintlayout)
     implementation(libs.jetty.server)
-    implementation(libs.jetty.ee10.servlet)
     implementation(libs.androidx.documentfile)
+    implementation(libs.okhttp)
+    implementation(libs.androidx.navigation.fragment.ktx)
+    implementation(libs.androidx.navigation.ui.ktx)
+    debugImplementation(libs.okhttp.logging)
     testImplementation(libs.junit)
+    testImplementation(libs.mockito.core)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }

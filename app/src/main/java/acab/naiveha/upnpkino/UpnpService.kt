@@ -6,7 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
+import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
@@ -17,30 +17,29 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
-import android.os.VibrationEffect
-import android.os.VibratorManager
+import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.InetAddress
 
 class UpnpService : Service() {
     companion object {
-        private val _isRunning = MutableStateFlow(false)
-        val isRunning = _isRunning.asStateFlow()
         private const val CHANNEL_ID = "UpnpKinoServiceChannel"
-        private val _events = MutableSharedFlow<String>()
-        val events = _events.asSharedFlow()
-        var ipAddress: InetAddress? = null
     }
+    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var multicastServer: MulticastServer
     private lateinit var httpServer: HttpServer
     lateinit var configuration: Configuration
     lateinit var preferences: Preferences
     lateinit var upnpMessages: UpnpMessages
+    lateinit var dlnaController: DlnaController
+    lateinit var chromecastController: ChromecastController
     private var wakeLock: PowerManager.WakeLock? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private lateinit var connectivityManager: ConnectivityManager
@@ -51,7 +50,7 @@ class UpnpService : Service() {
 
         override fun onLost(network: Network) {
             super.onLost(network)
-            vibrate()
+            Constants.vibrate(this@UpnpService)
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(this@UpnpService, "Error: Network disconnected. Reconnect WiFi and restart the service", Toast.LENGTH_LONG).show()
             }
@@ -59,9 +58,6 @@ class UpnpService : Service() {
         }
     }
 
-    suspend fun postEvent(event: String) {
-        _events.emit(event)
-    }
 
     override fun onBind(intent: Intent?): IBinder? {
         return null
@@ -69,60 +65,96 @@ class UpnpService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d("UpnpService", "onCreate")
         preferences = Preferences(this@UpnpService)
-        configuration = Configuration(this@UpnpService)
+        configuration = Configuration(this@UpnpService, this@UpnpService)
         upnpMessages = UpnpMessages(this@UpnpService, this@UpnpService)
         connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
     }
 
     @SuppressLint("WakelockTimeout")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        _isRunning.value = false
-        configuration.setInetAddress(ipAddress)
+        val ipAddressStr = intent?.getStringExtra("ip_address")
+        Log.d("UpnpService", "onStartCommand: ipAddress=$ipAddressStr")
+        if (ipAddressStr == null) {
+            Log.e("UpnpService", "onStartCommand: ipAddress is null, stopping self")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        UpnpRepository.kinoService.setStarting(true)
         createNotificationChannel()
         startForeground(1, createNotification("Starting servers..."))
-        configuration.readSharedFolder {//onFinish
+
+        serviceScope.launch {
+            val ipAddress = try {
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    InetAddress.getByName(ipAddressStr)
+                }
+            } catch (e: Exception) {
+                null
+            }
+
+            if (ipAddress == null) {
+                Log.e("UpnpService", "Failed to resolve IP address: $ipAddressStr")
+                stopSelf()
+                return@launch
+            }
+
+            configuration.setInetAddress(ipAddress)
             val networkRequest = NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
                 .build()
+            Log.d("UpnpService", "Registering network callback")
             connectivityManager.registerNetworkCallback(networkRequest, networkCallback)
 
-            val powerManager = getSystemService(POWER_SERVICE) as PowerManager
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "UpnpStreamer::WakeLock")
-            wakeLock?.acquire()
-
-            val wifiManager = getSystemService(WIFI_SERVICE) as WifiManager
-            multicastLock = wifiManager.createMulticastLock("UpnpStreamer::MulticastLock")
-            multicastLock?.setReferenceCounted(true)
-            multicastLock?.acquire()
+            FfmpegInstaller.install(this@UpnpService)
 
             //to do: register a listener for changes to storage/shared folder
             //if any changes, update the configuration
             //to do: put a lock on the shared folder to prevent deletion while service is running
             httpServer = HttpServer(this@UpnpService, this@UpnpService)
-            httpServer.start { httpPort, status ->
-                if (httpPort == -1) {
-                    vibrate()
-                    Handler(Looper.getMainLooper()).post {
-                        Toast.makeText(this@UpnpService, status, Toast.LENGTH_LONG).show()
+            Log.d("UpnpService", "Starting HTTP server")
+            val (httpPort, status) = httpServer.start()
+            if (httpPort == -1) {
+                Log.e("UpnpService", "HTTP server failed to start: $status")
+                Constants.vibrate(this@UpnpService)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@UpnpService, status, Toast.LENGTH_LONG).show()
+                }
+                stopSelf()
+            } else {
+                configuration.setHttpServerPort(httpPort)
+                Log.d("UpnpService", "HTTP server started on port $httpPort. Reading shared folder.")
+                configuration.readSharedFolder()
+                dlnaController = DlnaController(this@UpnpService, this@UpnpService)
+                chromecastController = ChromecastController(this@UpnpService, this@UpnpService)
+                multicastServer = MulticastServer(this@UpnpService)
+                Log.d("UpnpService", "Starting multicast server")
+                val (multicastPort, multicastStatus) = multicastServer.start()
+                if (multicastPort == -1) {
+                    Log.e("UpnpService", "Multicast server failed to start: $multicastStatus")
+                    Constants.vibrate(this@UpnpService)
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@UpnpService, multicastStatus, Toast.LENGTH_LONG).show()
+                        Log.e("upnpkino", multicastStatus)
                     }
                     stopSelf()
                 } else {
-                    configuration.setHttpServerPort(httpPort)
-                    multicastServer = MulticastServer(this@UpnpService)
-                    multicastServer.start { multicastPort, status ->
-                        if (multicastPort == -1) {
-                            vibrate()
-                            Handler(Looper.getMainLooper()).post {
-                                Toast.makeText(this@UpnpService, status, Toast.LENGTH_LONG).show()
-                            }
-                            stopSelf()
-                        } else {
-                            val ipAddress = configuration.getIpAddress()
-                            updateNotification("Running on $ipAddress")
-                            _isRunning.value = true
-                        }
-                    }
+                    val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+                    wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "UpnpStreamer::WakeLock")
+                    wakeLock?.acquire()
+
+                    val wifiManager = getSystemService(WIFI_SERVICE) as WifiManager
+                    multicastLock = wifiManager.createMulticastLock("UpnpStreamer::MulticastLock")
+                    multicastLock?.setReferenceCounted(true)
+                    multicastLock?.acquire()
+
+                    val currentIpAddress = configuration.getIpAddress()
+                    Log.d("UpnpService", "Service successfully started on $currentIpAddress")
+                    updateNotification("Running on $currentIpAddress")
+                    UpnpRepository.kinoService.setStarting(false)
+                    UpnpRepository.kinoService.setRunning(true)
                 }
             }
         }
@@ -130,15 +162,45 @@ class UpnpService : Service() {
     }
 
     override fun onDestroy() {
+        Log.d("UpnpService", "onDestroy")
+        if (this::dlnaController.isInitialized) {
+            Log.d("UpnpService", "Releasing DlnaController")
+            dlnaController.release()
+        }
+        if (this::chromecastController.isInitialized) {
+            Log.d("UpnpService", "Releasing ChromecastController")
+            chromecastController.release()
+        }
         super.onDestroy()
+        serviceScope.cancel()
+        if (this::configuration.isInitialized) {
+            Log.d("UpnpService", "Releasing Configuration")
+            configuration.release()
+        }
         if (this::httpServer.isInitialized) {
+            Log.d("UpnpService", "Stopping HttpServer")
             httpServer.stop()
         }
         if (this::multicastServer.isInitialized) {
+            Log.d("UpnpService", "Stopping MulticastServer")
             multicastServer.stop()
         }
+        if (this::connectivityManager.isInitialized) {
+            try {
+                Log.d("UpnpService", "Unregistering network callback")
+                connectivityManager.unregisterNetworkCallback(networkCallback)
+            } catch (e: Exception) {
+                //ignore. we are shutting down anyway
+            }
+        }
+        if (this::preferences.isInitialized) {
+             // preferences don't have release but good for consistency
+        }
+        if (this::upnpMessages.isInitialized) {
+             // upnpMessages don't have release but good for consistency
+        }
 
-        //remove locks
+        // Release locks
         if (wakeLock?.isHeld == true) {
             wakeLock?.release()
         }
@@ -148,26 +210,30 @@ class UpnpService : Service() {
         }
         multicastLock = null
 
-        try {
-            connectivityManager.unregisterNetworkCallback(networkCallback)
-        } catch (e: Exception) {
-            //ignore. we are shutting down anyway
-        }
-        _isRunning.value = false
+        UpnpRepository.stop()
     }
 
+    @Suppress("DEPRECATION")
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        vibrate()
-        Handler(Looper.getMainLooper()).post {
-            Toast.makeText(this@UpnpService, "Error: Memory low. Shutting down...", Toast.LENGTH_LONG).show()
+        if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level == ComponentCallbacks2.TRIM_MEMORY_COMPLETE) {
+            val activityManager = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+            val memoryInfo = android.app.ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memoryInfo)
+
+            if (memoryInfo.lowMemory) {
+                Constants.vibrate(this@UpnpService)
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(this@UpnpService, "Error: Memory low. Shutting down...", Toast.LENGTH_LONG).show()
+                }
+                stopSelf()
+            }
         }
-        stopSelf()
     }
 
     override fun onLowMemory() {
         super.onLowMemory()
-        vibrate()
+        Constants.vibrate(this@UpnpService)
         Handler(Looper.getMainLooper()).post {
             Toast.makeText(this@UpnpService, "Error: Memory low. Shutting down...", Toast.LENGTH_LONG).show()
         }
@@ -208,12 +274,5 @@ class UpnpService : Service() {
     private fun updateNotification(text: String) {
         val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(1, createNotification(text))
-    }
-
-    private fun vibrate() {
-        val vibrationEffect = VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), -1)
-        val vibratorManager = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
-        val vibrator = vibratorManager.defaultVibrator
-        vibrator.vibrate(vibrationEffect)
     }
 }

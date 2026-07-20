@@ -23,3 +23,19 @@
 -keep class org.eclipse.jetty.** { *; }
 -keep interface org.eclipse.jetty.** { *; }
 -dontwarn org.eclipse.jetty.**
+
+-keep class java.util.ServiceLoader { *; }
+-keep class java.util.ServiceLoader$Provider { *; }
+-dontwarn java.util.ServiceLoader
+-dontwarn java.util.ServiceLoader$Provider
+
+-keep class kotlinx.coroutines.android.AndroidDispatcherFactory { *; }
+-keep class kotlinx.coroutines.internal.MainDispatcherFactory { *; }
+
+# Strip verbose logging calls from release builds
+-assumenosideeffects class android.util.Log {
+    public static *** v(...);
+    public static *** d(...);
+    public static *** i(...);
+    public static *** w(...);
+}

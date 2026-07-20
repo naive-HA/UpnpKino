@@ -1,1 +1,1 @@
-Uncomplicated simple: Stream audio and/or videos to upnp enabled players, eg VLC
+Uncomplicated simple: stream audio and/or videos to upnp enabled players, eg VLC

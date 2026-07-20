@@ -1,3 +1,4 @@
+@file:Suppress("UnstableApiUsage")
 pluginManagement {
     repositories {
         google {
@@ -24,3 +25,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "UpnpKino"
 include(":app")
+include(":ponyfill")

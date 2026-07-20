@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/nav_home"
+        android:icon="@drawable/ic_menu_connect"
+        android:title="Home" />
+    <item
+        android:id="@+id/nav_dlna"
+        android:icon="@drawable/movie_cast"
+        android:title="Control DLNA devices" />
+<!--    <item-->
+<!--        android:id="@+id/nav_chromecast"-->
+<!--        android:icon="@drawable/chromecast"-->
+<!--        android:title="Control Chromecast devices" />-->
+    <item
+        android:id="@+id/nav_licenses"
+        android:icon="@drawable/info"
+        android:title="@string/menu_licenses" />
+</menu>
