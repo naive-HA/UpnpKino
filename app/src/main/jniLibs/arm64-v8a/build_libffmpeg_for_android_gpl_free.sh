@@ -6,12 +6,15 @@ set -euo pipefail
 #
 # Cross-compiles the dependency chain for Android arm64-v8a.
 # Purpose: re-encode locally available video files for Chromecast / Miracast /
-# AirPlay playback. 
+# AirPlay playback, and probe them (ffprobe) for accurate codec/profile/
+# subtitle-track metadata beyond what Android's MediaExtractor exposes.
 #
 # License: LGPL 2.1+  (--enable-gpl is NOT set; libx264 is NOT included)
 # Video encoding is provided exclusively by the device's MediaCodec hardware
 # encoder (h264_mediacodec, hevc_mediacodec) via the Android NDK AMediaCodec
-# API.
+# API. ffprobe shares the same libavformat/libavcodec build as ffmpeg, so it
+# inherits the same LGPL-only licensing — no separate GPL exposure from
+# enabling it.
 #
 # Dependency chain:
 #   zlib 1.3.2      → compressed-track MKV support
@@ -405,8 +408,8 @@ cd "$FFMPEG_SRC"
     --disable-network \
     --disable-bzlib \
     --disable-iconv \
-    --disable-ffprobe \
     --disable-ffplay \
+    --enable-ffprobe \
     --enable-zlib \
     --enable-libass \
     --enable-static \
@@ -429,6 +432,7 @@ cd "$FFMPEG_SRC"
     --enable-demuxer=srt \
     --enable-demuxer=ass \
     --enable-demuxer=webvtt \
+    --enable-demuxer=lavfi \
     \
     `# ---- Video decoders ----` \
     --enable-decoder=h264 \
@@ -537,6 +541,8 @@ cd "$FFMPEG_SRC"
     --enable-filter=aresample \
     --enable-filter=subtitles \
     --enable-filter=ass \
+    --enable-filter=testsrc \
+    --enable-filter=sine \
     \
     --extra-cflags="-Os -fPIC -I$OUTPUT_DIR/include -Wno-deprecated-declarations -Wno-unused-function" \
     --extra-ldflags="-lm -L$OUTPUT_DIR/lib" \
@@ -574,6 +580,23 @@ echo "Binary info:"
 "$READELF" -h "$BINARY" | grep -E "Machine|Class|Type"
 echo "(ARM64 binary — deploy to Android device to run)"
 
+PROBE_BINARY="$OUTPUT_DIR/bin/ffprobe"
+"$STRIP" --strip-all "$PROBE_BINARY"
+
+echo ""
+echo "============================================================"
+echo " ffprobe build complete"
+echo "============================================================"
+ls -lh "$PROBE_BINARY"
+
+echo ""
+echo "Shared library dependencies:"
+"$READELF" -d "$PROBE_BINARY" | grep NEEDED
+
+echo ""
+echo "16 KB page alignment (all LOAD Align values must be 0x4000):"
+"$READELF" -l "$PROBE_BINARY" | grep -E "^\s*LOAD"
+
 # =============================================================================
 # Deploy
 # =============================================================================
@@ -581,12 +604,17 @@ echo "(ARM64 binary — deploy to Android device to run)"
 DEPLOY_DEST="$HOME/Downloads/libffmpeg.so"
 cp "$BINARY" "$DEPLOY_DEST"
 
+PROBE_DEPLOY_DEST="$HOME/Downloads/libffprobe.so"
+cp "$PROBE_BINARY" "$PROBE_DEPLOY_DEST"
+
 echo ""
 echo "============================================================"
 echo " Deployed"
 echo "============================================================"
 ls -lh "$DEPLOY_DEST"
 echo "  $DEPLOY_DEST"
+ls -lh "$PROBE_DEPLOY_DEST"
+echo "  $PROBE_DEPLOY_DEST"
 echo "============================================================"
 
 # =============================================================================
@@ -608,6 +636,30 @@ RUNTIME PROFILE
   All other libs statically linked: zlib, libass, HarfBuzz,
   FreeType, FriBidi
   16 KB page-aligned (Android 15+ / Play Store compliant)
+
+------------------------------------------------------------
+ FFPROBE
+------------------------------------------------------------
+
+  Same libavformat/libavcodec build as ffmpeg above — same
+  format/codec coverage, same LGPL licensing, no separate
+  --enable flags needed. Deployed alongside ffmpeg as
+  libffprobe.so.
+
+  Covers what MediaExtractor can't: reliable profile/level
+  reporting without manual bitstream parsing, and subtitle
+  formats Android has no MIME constant for at all (ASS/SSA —
+  common in Matroska rips).
+
+------------------------------------------------------------
+ SYNTHETIC TEST SOURCES
+------------------------------------------------------------
+
+  lavfi demuxer + testsrc/sine filters — generate video/audio
+  input without a real file on disk, for exercising the
+  transcoding pipeline end-to-end:
+    -f lavfi -i testsrc=size=1280x720:rate=30
+    -f lavfi -i sine=frequency=1000:duration=5
 
 ------------------------------------------------------------
  INPUT
