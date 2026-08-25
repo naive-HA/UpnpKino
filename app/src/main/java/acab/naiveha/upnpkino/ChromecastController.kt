@@ -119,7 +119,7 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
                         return@collect
                     }
                     val fileId = repo.selectedMediaFileId.value
-                    if(fileId?.let { device.mediaCollection[it] } !is Configuration.MediaNode.Item) {
+                    if(fileId?.let { device.mediaCollection[it] } !is MediaCollection.MediaNode.Item) {
                         Log.w("ChromecastController", "Invalid or missing media item for command $streamingFlag")
                         return@collect
                     }
@@ -428,7 +428,7 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
         val devices = repo.devices.value
         val device = deviceId?.let { devices?.get(it) } ?: return
         val fileId = repo.selectedMediaFileId.value
-        if(fileId?.let { device.mediaCollection[it] } !is Configuration.MediaNode.Item) return
+        if(fileId?.let { device.mediaCollection[it] } !is MediaCollection.MediaNode.Item) return
 
 
 
@@ -600,7 +600,7 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
             Log.e("ChromecastController", "requestPlayback: device not found")
             return
         }
-        val mediaFile = fileId.let { chromecastDevice.mediaCollection[it] } as? Configuration.MediaNode.Item ?: run {
+        val mediaFile = fileId.let { chromecastDevice.mediaCollection[it] } as? MediaCollection.MediaNode.Item ?: run {
             Log.e("ChromecastController", "requestPlayback: media file not found")
             return
         }
@@ -645,7 +645,7 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
                     Log.e("ChromecastController", "sendMediaCommand LOAD: device not found")
                     return false
                 }
-                val mediaFile = fileId?.let { chromecastDevice.mediaCollection[it] } as? Configuration.MediaNode.Item ?: run {
+                val mediaFile = fileId?.let { chromecastDevice.mediaCollection[it] } as? MediaCollection.MediaNode.Item ?: run {
                     Log.e("ChromecastController", "sendMediaCommand LOAD: media file not found")
                     return false
                 }

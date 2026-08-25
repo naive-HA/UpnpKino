@@ -19,6 +19,7 @@ import acab.naiveha.upnpkino.Constants.secondsToDuration
 import kotlin.String
 import kotlin.time.Duration.Companion.milliseconds
 import android.util.Log
+import kotlin.text.contains
 
 class DlnaController(val context: Context, val upnpService: UpnpService) {
     companion object {
@@ -59,7 +60,145 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                 if (deviceId == null) {
                     resetDlnaActivity()
                 } else {
-                    //no handshake required
+                    val devices = repo.devices.value
+                    val device = deviceId.let { devices?.get(it) } ?: run {
+                        Log.e("DlnaController", "No device selected")
+                        repo.setSelectedDeviceId(null)
+                        return@collect
+                    }
+                    val command = "GetProtocolInfo"
+                    val controlUrl = device.controlUrls[Constants.Dlna.getService(command)] ?: run {
+                        Log.e("DlnaController", "Service not supported by device")
+                        repo.setSelectedDeviceId(null)
+                        return@collect
+                    }
+                    val serviceUrn = device.serviceUrns[Constants.Dlna.getService(command)] ?: run {
+                        Log.e("DlnaController", "Service not supported by device")
+                        repo.setSelectedDeviceId(null)
+                        return@collect
+                    }
+                    val fullUrl = resolveUrl(device, controlUrl)
+                    val payload = upnpService.upnpMessages.draftDlnaMessage(command, serviceUrn, mapOf(), device.mediaCollection)
+                    val request = Request.Builder()
+                        .url(fullUrl)
+                        .post(payload.toRequestBody("text/xml; charset=utf-8".toMediaType()))
+                        .addHeader("SOAPACTION", "\"$serviceUrn#$command\"")
+                        .build()
+                    client.newCall(request).execute().use { response ->
+                        val responseBody = response.body?.string() ?: ""
+                        Log.d("DlnaController", "SOAP command $command response: code=${response.code}")
+                        if (response.isSuccessful && responseBody.isNotEmpty()) {
+                            val expectedResponse = Constants.Dlna.getResponse(command)
+                            if (expectedResponse.isNotEmpty() && upnpService.upnpMessages.parseUpnpHttpRequest(responseBody) == expectedResponse
+                            ) {
+                                val responseData = upnpService.upnpMessages.parseDlnaResponse(responseBody)
+                                if (responseData.isNotEmpty()) {
+                                    val deviceMediaCollection = UpnpRepository.kinoService.sharedMediaCollection.value.toMutableMap()
+                                    val sinkData = responseData["Sink"] ?: ""
+                                    if (sinkData.isBlank()) {
+                                        device.setMediaCollection(deviceMediaCollection)
+                                        return@collect
+                                    }
+                                    var sinkEntries = sinkData.split(",").mapNotNull { raw ->
+                                        val parts = raw.split(":", limit = 4)
+                                        if (parts.size == 4) {
+                                            mapOf("protocol" to parts[0],
+                                                  "network" to parts[1],
+                                                  "contentFormat" to parts[2].substringBefore(";"),
+                                                  "dlnaProfile" to parts[3].split(";")
+                                                      .firstOrNull { it.startsWith("DLNA.ORG_PN=") }
+                                                      ?.substringAfter("DLNA.ORG_PN="))
+                                        } else {
+                                            null
+                                        }
+                                    }
+                                    //TODO remove this
+                                    sinkEntries = "http-get:*:image/jpeg:DLNA.ORG_PN=JPEG_TN,http-get:*:image/jpeg:DLNA.ORG_PN=JPEG_SM,http-get:*:image/jpeg:DLNA.ORG_PN=JPEG_MED,http-get:*:image/jpeg:DLNA.ORG_PN=JPEG_LRG,http-get:*:video/mpeg:DLNA.ORG_PN=AVC_TS_HD_50_AC3_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=AVC_TS_HD_60_AC3_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=AVC_TS_HP_HD_AC3_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=AVC_TS_MP_HD_AC3_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=AVC_TS_MP_HD_MPEG1_L3_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=AVC_TS_MP_SD_AAC_MULT5_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=AVC_TS_MP_SD_AC3_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=AVC_TS_MP_SD_MPEG1_L3_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=MPEG_PS_NTSC,http-get:*:video/mpeg:DLNA.ORG_PN=MPEG_PS_PAL,http-get:*:video/mpeg:DLNA.ORG_PN=MPEG_TS_HD_NA_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=MPEG_TS_SD_NA_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=MPEG_TS_SD_EU_ISO,http-get:*:video/mpeg:DLNA.ORG_PN=MPEG1,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_MP_SD_AAC_MULT5,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_MP_SD_AC3,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_BL_CIF15_AAC_520,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_BL_CIF30_AAC_940,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_BL_L31_HD_AAC,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_BL_L32_HD_AAC,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_BL_L3L_SD_AAC,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_HP_HD_AAC,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_MP_HD_1080i_AAC,http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_MP_HD_720p_AAC,http-get:*:video/mp4:DLNA.ORG_PN=MPEG4_P2_MP4_ASP_AAC,http-get:*:video/mp4:DLNA.ORG_PN=MPEG4_P2_MP4_SP_VGA_AAC,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_HD_50_AC3,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_HD_50_AC3_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_HD_60_AC3,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_HD_60_AC3_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_HP_HD_AC3_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_HD_AAC_MULT5_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_HD_AC3,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_HD_AC3_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_HD_MPEG1_L3,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_HD_MPEG1_L3_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_SD_AAC_MULT5,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_SD_AAC_MULT5_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_SD_AC3,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_SD_AC3_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_SD_MPEG1_L3,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=AVC_TS_MP_SD_MPEG1_L3_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=MPEG_TS_HD_NA,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=MPEG_TS_HD_NA_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=MPEG_TS_SD_EU,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=MPEG_TS_SD_EU_T,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=MPEG_TS_SD_NA,http-get:*:video/vnd.dlna.mpeg-tts:DLNA.ORG_PN=MPEG_TS_SD_NA_T,http-get:*:video/x-ms-wmv:DLNA.ORG_PN=WMVSPLL_BASE,http-get:*:video/x-ms-wmv:DLNA.ORG_PN=WMVSPML_BASE,http-get:*:video/x-ms-wmv:DLNA.ORG_PN=WMVSPML_MP3,http-get:*:video/x-ms-wmv:DLNA.ORG_PN=WMVMED_BASE,http-get:*:video/x-ms-wmv:DLNA.ORG_PN=WMVMED_FULL,http-get:*:video/x-ms-wmv:DLNA.ORG_PN=WMVMED_PRO,http-get:*:video/x-ms-wmv:DLNA.ORG_PN=WMVHIGH_FULL,http-get:*:video/x-ms-wmv:DLNA.ORG_PN=WMVHIGH_PRO,http-get:*:video/3gpp:DLNA.ORG_PN=MPEG4_P2_3GPP_SP_L0B_AAC,http-get:*:video/3gpp:DLNA.ORG_PN=MPEG4_P2_3GPP_SP_L0B_AMR,http-get:*:audio/mpeg:DLNA.ORG_PN=MP3,http-get:*:audio/x-ms-wma:DLNA.ORG_PN=WMABASE,http-get:*:audio/x-ms-wma:DLNA.ORG_PN=WMAFULL,http-get:*:audio/x-ms-wma:DLNA.ORG_PN=WMAPRO,http-get:*:audio/x-ms-wma:DLNA.ORG_PN=WMALSL,http-get:*:audio/x-ms-wma:DLNA.ORG_PN=WMALSL_MULT5,http-get:*:audio/mp4:DLNA.ORG_PN=AAC_ISO_320,http-get:*:audio/3gpp:DLNA.ORG_PN=AAC_ISO_320,http-get:*:audio/mp4:DLNA.ORG_PN=AAC_ISO,http-get:*:audio/mp4:DLNA.ORG_PN=AAC_MULT5_ISO,http-get:*:audio/L16;rate=44100;channels=2:DLNA.ORG_PN=LPCM".split(",").mapNotNull { raw ->
+                                        val parts = raw.split(":", limit = 4)
+                                        if (parts.size == 4) {
+                                            mapOf("protocol" to parts[0],
+                                                "network" to parts[1],
+                                                "contentFormat" to parts[2].substringBefore(";"),
+                                                "dlnaProfile" to parts[3].split(";")
+                                                    .firstOrNull { it.startsWith("DLNA.ORG_PN=") }
+                                                    ?.substringAfter("DLNA.ORG_PN="))
+                                        } else {
+                                            null
+                                        }
+                                    }
+                                    if (sinkEntries.isEmpty()){
+                                        device.setMediaCollection(deviceMediaCollection)
+                                        return@collect
+                                    }
+                                    val mediaItems = deviceMediaCollection.values.filterIsInstance<MediaCollection.MediaNode.Item>()
+                                    for (item in mediaItems){
+                                        Log.d("DlnaController", "processing: ${item.name} (${item.mimeType})")
+                                        val matchedContentFormat = sinkEntries.filter {
+                                            it["contentFormat"] == "*" || it["contentFormat"].equals(
+                                                item.mimeType,
+                                                ignoreCase = true
+                                            )
+                                        }
+                                        if (!matchedContentFormat.isEmpty()) {
+                                            if (matchedContentFormat.any { it["dlnaProfile"] == null }){
+                                                Log.d("DlnaController", "dlnaProfile is null: remote device accepts anything; file can be natively played")
+                                                continue
+                                            }
+                                            val nativelyPlayed = matchedContentFormat.any { entry ->
+                                                val profile = entry["dlnaProfile"] ?: return@any false
+                                                val profileVideo = item.videoCodec == null || (item.dlnaProfileVideo.isNotEmpty() && item.dlnaProfileVideo.all { profile.contains(it) })
+                                                val profileAudio = item.audioCodec == null || (item.dlnaProfileAudio.isNotEmpty() && item.dlnaProfileAudio.all { profile.contains(it) })
+                                                profileVideo && profileAudio
+                                            }
+                                            if (nativelyPlayed) {
+                                                Log.d("DlnaController", "natively playable: ${item.name} (${item.mimeType})")
+                                                continue
+                                            }
+                                        }
+
+                                        Log.w("DlnaController", "needs transcoding: ${item.name} (${item.mimeType})")
+
+                                        val canBeTranscoded = true
+                                        if (canBeTranscoded) {
+//                                            deviceMediaCollection[item.id] = item.copy()
+
+                                            continue
+                                        } else {
+                                            val parent = deviceMediaCollection[item.parentId] as? MediaCollection.MediaNode.Container
+                                            if (parent != null) {
+                                                deviceMediaCollection[item.parentId] = parent.copy(children = parent.children - item.id)
+                                            }
+                                            deviceMediaCollection.remove(item.id)
+                                            Log.e("DlnaController", "Cannot be played nor transcoded: ${item.name} (${item.mimeType})")
+                                        }
+                                    }
+                                    val mediaContainers = deviceMediaCollection.values.filterIsInstance<MediaCollection.MediaNode.Container>()
+                                    var foundEmptyContainer = false
+                                    do {
+                                        for (container in mediaContainers){
+                                            if (container.children.isEmpty()){
+                                                foundEmptyContainer = true
+                                                val parent = deviceMediaCollection[container.parentId] as? MediaCollection.MediaNode.Container
+                                                if (parent != null) {
+                                                    deviceMediaCollection[container.parentId] = parent.copy(children = parent.children - container.id)
+                                                }
+                                                deviceMediaCollection.remove(container.id)
+                                            }
+                                        }
+                                    } while (foundEmptyContainer)
+                                    device.setMediaCollection(deviceMediaCollection)
+                                    return@collect
+                                } else {
+                                    Log.w("upnpkino", "SOAP command $command failed: dlna response is empty: $responseData")
+                                }
+                            } else {
+                                Log.w("upnpkino", "SOAP command $command failed: not the expected response: $expectedResponse")
+                            }
+                        } else {
+                            Log.w("upnpkino", "SOAP command $command failed: code=${response.code} body=$responseBody")
+                        }
+                        repo.setSelectedDeviceId(null)
+                    }
                 }
             }
         }
@@ -74,7 +213,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                         return@collect
                     }
                     val fileId = repo.selectedMediaFileId.value
-                    if (fileId?.let { device.mediaCollection[it] } !is Configuration.MediaNode.Item) {
+                    if (fileId?.let { device.mediaCollection[it] } !is MediaCollection.MediaNode.Item) {
                         Log.e("DlnaController", "Invalid media item for command $streamingFlag")
                         return@collect
                     }
@@ -213,7 +352,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
     }
     private fun sendSubscribeRequest(device: DlnaNodeModel, url: String, callback: String, sid: String? = null): Pair<String, Int>? {
         val fullUrl = resolveUrl(device, url)
-        Log.v("DlnaController", "Sending SUBSCRIBE request to $fullUrl (sid=$sid)")
+        Log.d("DlnaController", "Sending SUBSCRIBE request to $fullUrl (sid=$sid)")
         return try {
             val builder = Request.Builder()
                 .url(fullUrl)
@@ -351,23 +490,25 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             Log.e("DlnaController", "sendMediaCommand: service not supported by device")
             return null
         }
-        Log.v("DlnaController", "Sending SOAP command: $command to ${device.friendlyName}")
+        Log.d("DlnaController", "Sending SOAP command: $command to ${device.friendlyName}")
         return try {
             val fullUrl = resolveUrl(device, soapUrl)
-            val payload = upnpService.upnpMessages.draftDlnaMessage(command, args, device.mediaCollection)
+            val serviceUrn = device.serviceUrns[Constants.Dlna.getService(command)] ?: run {
+                Log.e("DlnaController", "Service ${Constants.Dlna.getService(command)} not supported by device")
+                throw Exception("Service ${Constants.Dlna.getService(command)} not supported by device")
+            }
+            val payload = upnpService.upnpMessages.draftDlnaMessage(command, serviceUrn, args, device.mediaCollection)
             val request = Request.Builder()
                 .url(fullUrl)
                 .post(payload.toRequestBody("text/xml; charset=utf-8".toMediaType()))
-                .addHeader("SOAPACTION", "\"${Constants.Dlna.getURN(command)}#$command\"")
+                .addHeader("SOAPACTION", "\"$serviceUrn#$command\"")
                 .build()
             client.newCall(request).execute().use { response ->
                 val responseBody = response.body?.string() ?: ""
-                Log.v("DlnaController", "SOAP command $command response: code=${response.code}")
+                Log.d("DlnaController", "SOAP command $command response: code=${response.code}")
                 if (response.isSuccessful && responseBody.isNotEmpty()) {
                     val expectedResponse = Constants.Dlna.getResponse(command)
-                    if (expectedResponse.isNotEmpty() && upnpService.upnpMessages.parseUpnpHttpRequest(
-                            responseBody
-                        ) == expectedResponse
+                    if (expectedResponse.isNotEmpty() && upnpService.upnpMessages.parseUpnpHttpRequest(responseBody) == expectedResponse
                     ) {
                         return responseBody
                     }
@@ -383,7 +524,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         }
     }
     fun handleMediaEvent(remoteAddr: String, payload: String) {
-        Log.v("DlnaController", "Received event from $remoteAddr")
+        Log.d("DlnaController", "Received event from $remoteAddr")
         when (repo.streamingFeedbackFlag.value) {
             ActionFeedback.STOPPED,
             ActionFeedback.DISCONNECTED,
@@ -438,14 +579,15 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                             deviceDescription.friendlyName,
                             location,
                             deviceDescription.urlBase,
+                            deviceDescription.serviceUrns,
                             deviceDescription.controlUrls,
                             deviceDescription.eventUrls
                         )
-                        device.setMediaCollection(UpnpRepository.kinoService.sharedMediaCollection.value)
                         dlnaDevices[id] = device
                         withContext(Dispatchers.Main) {
                             repo.setDevices(dlnaDevices.toMap())
                         }
+                        Log.d("DlnaController", "Registered $location")
                     }
                 }
             } finally {
@@ -453,15 +595,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             }
         }
     }
-    suspend fun interrogateDevice(location: String): UpnpMessages.UpnpDeviceDescription? = withContext(Dispatchers.IO) {
-
-
-
-
-
-
-
-        
+    suspend fun interrogateDevice(location: String): UpnpNodeModel? = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
                 .url("http://$location")
@@ -470,6 +604,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     val responseBody = response.body?.string() ?: ""
+//                    Log.d("DlnaController", "Interrogate response: $responseBody")
                     upnpService.upnpMessages.parseUpnpDescription(responseBody)
                 } else {
                     null

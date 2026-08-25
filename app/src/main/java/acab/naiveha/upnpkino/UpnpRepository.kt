@@ -14,7 +14,13 @@ object UpnpRepository {
         private val _isStarting = MutableStateFlow(false)
         val isStarting = _isStarting.asStateFlow()
 
-        private val _sharedMediaCollection = MutableStateFlow<Map<String, Configuration.MediaNode>>(emptyMap())
+        private val _noOfSharedMediaFiles = MutableStateFlow(0)
+        val noOfSharedMediaFiles = _noOfSharedMediaFiles.asStateFlow()
+
+        private val _noOfIndexedMediaFiles = MutableStateFlow(0)
+        val noOfIndexedMediaFiles = _noOfIndexedMediaFiles.asStateFlow()
+
+        private val _sharedMediaCollection = MutableStateFlow<Map<String, MediaCollection.MediaNode>>(emptyMap())
         val sharedMediaCollection = _sharedMediaCollection.asStateFlow()
 
         fun setRunning(value: Boolean) { 
@@ -25,7 +31,13 @@ object UpnpRepository {
             Log.d("UpnpRepository", "KinoService: isStarting set to $value")
             _isStarting.value = value 
         }
-        fun setSharedMediaCollection(value: Map<String, Configuration.MediaNode>) { _sharedMediaCollection.value = value }
+        fun setNoOfSharedMediaFiles(value: Int) { _noOfSharedMediaFiles.value = value }
+        fun resetNoOfSharedMediaFiles() { _noOfSharedMediaFiles.value = 0 }
+
+        fun setNoOfIndexedMediaFiles() { _noOfIndexedMediaFiles.value += 1 }
+        fun resetNoOfIndexedMediaFiles() { _noOfIndexedMediaFiles.value = 0 }
+
+        fun setSharedMediaCollection(value: Map<String, MediaCollection.MediaNode>) { _sharedMediaCollection.value = value }
 
         fun stop() {
             _isRunning.value = false
@@ -278,6 +290,43 @@ object UpnpRepository {
         }
     }
 
+    class Transcoder {
+        private val _selectedMediaFileId = MutableStateFlow<String?>(null)
+        val selectedMediaFileId = _selectedMediaFileId.asStateFlow()
+        private val _transcodingFlag = MutableStateFlow<String?>(null)
+        val transcodingFlag = _transcodingFlag.asStateFlow()
+        private val _seekBarDuration = MutableStateFlow("00:00:00")
+        val seekBarDuration = _seekBarDuration.asStateFlow()
+        private val _seekBarPosition = MutableStateFlow("00:00:00")
+        val seekBarPosition = _seekBarPosition.asStateFlow()
+        private val _isTranscoderActivityVisible = MutableStateFlow(false)
+        val isTranscoderActivityVisible = _isTranscoderActivityVisible.asStateFlow()
+        fun setTranscoderActivityVisible(value: Boolean) {
+            _isTranscoderActivityVisible.value = value
+        }
+        fun setSelectedMediaFileId(value: String?) {
+            Log.d("UpnpRepository", "Transcoder: selectedMediaFileId set to $value")
+            _selectedMediaFileId.value = value
+        }
+        fun setTranscodingFlag(value: String?) {
+            Log.d("UpnpRepository", "Transcoder: streamingFlag set to $value")
+            _transcodingFlag.value = value
+        }
+        fun setSeekBarDuration(value: String) {
+            _seekBarDuration.value = value
+        }
+        fun setSeekBarPosition(value: String) {
+            _seekBarPosition.value = value
+        }
+        fun stop() {
+            _selectedMediaFileId.value = null
+            _transcodingFlag.value = null
+            _seekBarDuration.value = "00:00:00"
+            _seekBarPosition.value = "00:00:00"
+            _isTranscoderActivityVisible.value = false
+        }
+    }
+
     class Selector {
         private val sources = mutableMapOf<String, Any>()
 
@@ -293,6 +342,7 @@ object UpnpRepository {
     val kinoService = KinoService()
     val upnp = Upnp()
     val dlna = Dlna()
+    val transcoder = Transcoder()
     val chromecast = Chromecast()
     val selector = Selector()
 
@@ -305,6 +355,7 @@ object UpnpRepository {
 
     fun stop() {
         chromecast.stop()
+        transcoder.stop()
         dlna.stop()
         upnp.stop()
         kinoService.stop()

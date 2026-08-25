@@ -55,7 +55,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (realDenials.isNotEmpty()) {
-            Toast.makeText(this, "Permissions are required for the app to function properly: $realDenials", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, getString(R.string.permissions_required, realDenials.toString()), Toast.LENGTH_LONG).show()
             Log.d("upnpkino", "Real denials reported to user: $realDenials")
         } else {
             Log.d("upnpkino", "No real denials to report.")
@@ -127,7 +127,7 @@ class MainActivity : AppCompatActivity() {
         binding.button2.setOnLongClickListener {
             preferences.clearLocalMovieFolderUri()
             Constants.vibrate(this)
-            Toast.makeText(this, "Video library cleared", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.toast_video_library_cleared), Toast.LENGTH_SHORT).show()
             true
         }
         binding.button3.setOnClickListener {
@@ -137,7 +137,7 @@ class MainActivity : AppCompatActivity() {
         binding.button3.setOnLongClickListener {
             preferences.clearLocalMusicFolderUri()
             Constants.vibrate(this)
-            Toast.makeText(this, "Music library cleared", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.toast_music_library_cleared), Toast.LENGTH_SHORT).show()
             true
         }
         binding.textView.text = getString(R.string.version_info, BuildConfig.VERSION_NAME)
@@ -158,9 +158,20 @@ class MainActivity : AppCompatActivity() {
             }
         }
         lifecycleScope.launch {
+            combine(UpnpRepository.kinoService.noOfSharedMediaFiles, UpnpRepository.kinoService.noOfIndexedMediaFiles) { total, indexed ->
+                Pair(total, indexed)
+            }.collect { (total, indexed) ->
+                if (total > 0) {
+                    binding.status.text = getString(R.string.status_indexing, indexed, total)
+                } else {
+                    binding.status.text = ""
+                }
+            }
+        }
+        lifecycleScope.launch {
             UpnpRepository.upnp.repeatAliveNotification.collect { repeating ->
                 if (repeating) {
-                    Toast.makeText(this@MainActivity, "Re-announcing the server to the network", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, getString(R.string.toast_reannouncing), Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -172,6 +183,7 @@ class MainActivity : AppCompatActivity() {
                     binding.button.isEnabled = false
                     disableButtons()
                     startingAnimation.start()
+                    binding.status.text = getString(R.string.status_starting)
                     return@collect
                 }
                 if (isRunning) {
@@ -185,6 +197,9 @@ class MainActivity : AppCompatActivity() {
                     return@collect
                 }
                 startingAnimation.cancel()
+                binding.status.text = ""
+                UpnpRepository.kinoService.resetNoOfIndexedMediaFiles()
+                UpnpRepository.kinoService.resetNoOfSharedMediaFiles()
                 updateButtonState(isRunning)
             }
         }
@@ -201,18 +216,30 @@ class MainActivity : AppCompatActivity() {
                 }
                 R.id.nav_dlna -> {
                     val intent = Intent(this, DlnaActivity::class.java)
-//                    startActivity(intent)
+                    startActivity(intent)
 //                    binding.drawerLayout.closeDrawer(GravityCompat.START)
 //                    true
 //                }
 //                R.id.nav_chromecast -> {
 //                    val intent = Intent(this, ChromecastActivity::class.java)
+//                    startActivity(intent)
+                    binding.drawerLayout.closeDrawer(GravityCompat.START)
+                    true
+                }
+                R.id.nav_transcoder -> {
+                    val intent = Intent(this, TranscoderActivity::class.java)
                     startActivity(intent)
                     binding.drawerLayout.closeDrawer(GravityCompat.START)
                     true
                 }
                 R.id.nav_licenses -> {
                     val intent = Intent(this, LicensesActivity::class.java)
+                    startActivity(intent)
+                    binding.drawerLayout.closeDrawer(GravityCompat.START)
+                    true
+                }
+                R.id.nav_about -> {
+                    val intent = Intent(this, AboutActivity::class.java)
                     startActivity(intent)
                     binding.drawerLayout.closeDrawer(GravityCompat.START)
                     true

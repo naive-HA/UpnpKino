@@ -11,16 +11,16 @@ import androidx.core.net.toUri
 import androidx.core.view.GravityCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import acab.naiveha.upnpkino.databinding.ActivityLicensesBinding
+import acab.naiveha.upnpkino.databinding.ActivityAboutBinding
 
-class LicensesActivity : AppCompatActivity() {
+class AboutActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivityLicensesBinding
+    private lateinit var binding: ActivityAboutBinding
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        binding = ActivityLicensesBinding.inflate(layoutInflater)
+        binding = ActivityAboutBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.main) { v, insets ->
@@ -69,19 +69,19 @@ class LicensesActivity : AppCompatActivity() {
                     true
                 }
                 R.id.nav_licenses -> {
+                    val intent = Intent(this, LicensesActivity::class.java)
+                    startActivity(intent)
                     binding.drawerLayout.closeDrawer(GravityCompat.START)
                     true
                 }
                 R.id.nav_about -> {
-                    val intent = Intent(this, AboutActivity::class.java)
-                    startActivity(intent)
                     binding.drawerLayout.closeDrawer(GravityCompat.START)
                     true
                 }
                 else -> false
             }
         }
-        binding.navView.setCheckedItem(R.id.nav_licenses)
+        binding.navView.setCheckedItem(R.id.nav_about)
     }
 
     private fun openUrl() {

@@ -2,8 +2,11 @@ package acab.naiveha.upnpkino
 
 import android.content.Context
 import android.content.res.Resources
+import android.os.ParcelFileDescriptor
 import android.os.VibrationEffect
 import android.os.VibratorManager
+import android.system.Os
+import android.system.OsConstants
 import android.util.DisplayMetrics
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -12,6 +15,8 @@ import kotlin.math.max
 import kotlin.math.min
 
 object Constants {
+    const val UNKNOWN_FILE_SIZE = 0x7FFFFFFFFFFFFFFL
+
     val userAgent = "UpnpKino/1.0"
     const val APP_NAME = "UPnP Kino by naiveHA"
     val mimeType = mapOf(
@@ -22,17 +27,17 @@ object Constants {
         "wmv" to "video/x-ms-wmv",
         "webm" to "video/webm",
         "mp3" to "audio/mpeg",
-        "m4a" to "audio/mpeg",
-        "aac" to "audio/aac",
+        "m4a" to "audio/mp4",
         "flac" to "audio/x-flac",
         "wav" to "audio/x-wav",
+        "aac" to "audio/aac",
         "opus" to "audio/ogg")
-    val dlnaProfiles4Images = mapOf(
-        "icon_png" to "PNG_TN",
-        "large_png" to "PNG_LRG",
-        "icon_jpeg" to "JPEG_TN",
-        "small_jpeg" to "JPEG_SM",
-        "medium_jpeg" to "JPEG_MED")
+//    val dlnaProfiles4Images = mapOf(
+//        "icon_png" to "PNG_TN",
+//        "large_png" to "PNG_LRG",
+//        "icon_jpeg" to "JPEG_TN",
+//        "small_jpeg" to "JPEG_SM",
+//        "medium_jpeg" to "JPEG_MED")
     val movieExtensions = mimeType.filter { it.value.contains("video/") }.keys
     val musicExtensions = mimeType.filter { it.value.contains("audio/") }.keys
     fun vibrate(context: Context, short: Boolean = false) {
@@ -88,17 +93,31 @@ object Constants {
         val s = seconds % 60
         return String.format("%02d:%02d:%02d", h, m, s)
     }
+    fun getFileSize(pfd: ParcelFileDescriptor): Long {
+        val statSize = pfd.statSize
+        if (statSize > 0 && statSize != UNKNOWN_FILE_SIZE) return statSize
+
+        return try {
+            val fd = pfd.fileDescriptor
+            val current = Os.lseek(fd, 0, OsConstants.SEEK_CUR)
+            val size = Os.lseek(fd, 0, OsConstants.SEEK_END)
+            Os.lseek(fd, current, OsConstants.SEEK_SET)
+            if (size > 0 && size != UNKNOWN_FILE_SIZE) size else -1L
+        } catch (e: Exception) {
+            -1L
+        }
+    }
     object Dlna {
         object Service {
             const val AV_TRANSPORT = "AVTransport"
             const val CONNECTION_MANAGER = "ConnectionManager"
             const val RENDERING_CONTROL = "RenderingControl"
         }
-        object URN {
-            const val AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1"
-            const val CONNECTION_MANAGER = "urn:schemas-upnp-org:service:ConnectionManager:1"
-            const val RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
-        }
+//        object URN {
+//            const val AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1"
+//            const val CONNECTION_MANAGER = "urn:schemas-upnp-org:service:ConnectionManager:1"
+//            const val RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
+//        }
         object Action {
             const val SET_AV_TRANSPORT_URI = "SetAVTransportURI"
             const val PLAY = "Play"
@@ -109,18 +128,19 @@ object Constants {
             const val GET_MEDIA_INFO = "GetMediaInfo"
             const val GET_POSITION_INFO = "GetPositionInfo"
             const val GET_TRANSPORT_INFO = "GetTransportInfo"
+            const val GET_PROTOCOL_INFO = "GetProtocolInfo"
             const val ERROR = "Error"
         }
-        object ActionURN {
-            const val SET_AV_TRANSPORT_URI = Service.AV_TRANSPORT
-            const val PLAY = Service.AV_TRANSPORT
-            const val PAUSE = Service.AV_TRANSPORT
-            const val SEEK = Service.AV_TRANSPORT
-            const val STOP = Service.AV_TRANSPORT
-            const val GET_MEDIA_INFO = Service.AV_TRANSPORT
-            const val GET_POSITION_INFO = Service.AV_TRANSPORT
-            const val GET_TRANSPORT_INFO = Service.AV_TRANSPORT
-        }
+//        object ActionURN {
+//            const val SET_AV_TRANSPORT_URI = Service.AV_TRANSPORT
+//            const val PLAY = Service.AV_TRANSPORT
+//            const val PAUSE = Service.AV_TRANSPORT
+//            const val SEEK = Service.AV_TRANSPORT
+//            const val STOP = Service.AV_TRANSPORT
+//            const val GET_MEDIA_INFO = Service.AV_TRANSPORT
+//            const val GET_POSITION_INFO = Service.AV_TRANSPORT
+//            const val GET_TRANSPORT_INFO = Service.AV_TRANSPORT
+//        }
         object ActionResponse {
             const val SET_AV_TRANSPORT_URI = "SetAVTransportURIResponse"
             const val PLAY = "PlayResponse"
@@ -130,6 +150,7 @@ object Constants {
             const val GET_MEDIA_INFO = "GetMediaInfoResponse"
             const val GET_POSITION_INFO = "GetPositionInfoResponse"
             const val GET_TRANSPORT_INFO = "GetTransportInfoResponse"
+            const val GET_PROTOCOL_INFO = "GetProtocolInfoResponse"
         }
         object ActionFeedback {
             const val PLAYING = "PLAYING"
@@ -143,14 +164,15 @@ object Constants {
             Action.SET_AV_TRANSPORT_URI, Action.PLAY, Action.PAUSE,
             Action.SEEK, Action.STOP, Action.GET_POSITION_INFO,
             Action.GET_TRANSPORT_INFO, Action.GET_MEDIA_INFO -> Service.AV_TRANSPORT
+            Action.GET_PROTOCOL_INFO -> Service.CONNECTION_MANAGER
             else -> ""
         }
-        fun getURN(action: String): String = when(getService(action)) {
-            Service.AV_TRANSPORT -> URN.AV_TRANSPORT
-            Service.CONNECTION_MANAGER -> URN.CONNECTION_MANAGER
-            Service.RENDERING_CONTROL -> URN.RENDERING_CONTROL
-            else -> ""
-        }
+//        fun getURN(action: String): String = when(getService(action)) {
+//            Service.AV_TRANSPORT -> URN.AV_TRANSPORT
+//            Service.CONNECTION_MANAGER -> URN.CONNECTION_MANAGER
+//            Service.RENDERING_CONTROL -> URN.RENDERING_CONTROL
+//            else -> ""
+//        }
         fun getResponse(action: String): String = when(action) {
             Action.SET_AV_TRANSPORT_URI -> ActionResponse.SET_AV_TRANSPORT_URI
             Action.PLAY -> ActionResponse.PLAY
@@ -160,6 +182,7 @@ object Constants {
             Action.GET_MEDIA_INFO -> ActionResponse.GET_MEDIA_INFO
             Action.GET_POSITION_INFO -> ActionResponse.GET_POSITION_INFO
             Action.GET_TRANSPORT_INFO -> ActionResponse.GET_TRANSPORT_INFO
+            Action.GET_PROTOCOL_INFO -> ActionResponse.GET_PROTOCOL_INFO
             else -> ""
         }
     }
@@ -236,6 +259,27 @@ object Constants {
             const val WIRE_VARINT = 0
             const val WIRE_LEN = 2
             const val MAX_FRAME_BYTES = 1_048_576
+        }
+    }
+    object Transcoder {
+        enum class VideoCodec(val ffmpegEncoder: String) {
+            H264("h264_mediacodec"),
+            HEVC("hevc_mediacodec")
+        }
+        enum class AudioCodec(val ffmpegEncoder: String, val testChannels: Int) {
+            AAC("aac", 2),
+            AC3("ac3", 6)
+        }
+        enum class Container(val ffmpegMuxer: String) {
+            MP4("mp4"),
+            MPEG_TS("mpegts"),
+            MKV("matroska")
+        }
+        enum class Resolution(val maxWidth: Int, val maxHeight: Int) {
+            SD(720, 576),
+            HD_720(1280, 720),
+            HD_1080(1920, 1080),
+            UHD_4K(3840, 2160)
         }
     }
 }

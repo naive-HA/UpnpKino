@@ -1,36 +1,28 @@
 [<img src="https://gitlab.com/IzzyOnDroid/repo/-/raw/master/assets/IzzyOnDroidButtonGreyBorder_nofont.png" height="80" alt="Get it at IzzyOnDroid">](https://apt.izzysoft.de/packages/acab.naiveha.upnpkino)
 
 # UPnP Kino by naiveHA
-Uncomplicated simple: stream your video (mp4, mkv, mov, webm) and/or audio (mp3, m4a, aac, flac, wav, opus) files stored on your Android phone to another phone, tablet, computer or TV set running a compatible video player.
+**Uncomplicatedly simple**: stream your media library (video and audio) directly from your Android device to any UPnP/DLNA compatible player.
 
-UPnP Kino is compatible with VLC, eezUPnP and other upnp enabled players and control points.
+## Features
+- **Wide Format Support**: Stream video (`mp4`, `mkv`, `mov`, `webm`) and audio (`mp3`, `m4a`, `aac`, `flac`, `wav`, `opus`).
+- **Large File Support**: Unlike other legacy apps, UPnP Kino handles files larger than 2GB (perfect for high-quality H264 encodes).
+- **Background Streaming**: Keeps the media server running even when the screen is off or you're using other apps.
+- **Modern Backend**: Built on Eclipse Jetty 12 for reliable performance.
+- **Privacy Focused**: No tracking, no unnecessary permissions.
 
-Based on Eclipse Jetty 12 and requires minimum Android 15 VanillaIceCream (API 35)
+## Compatibility
+- **Device Requirements**: Android 8.0 (API 26) or higher.
+- **Tested Players**: 
+  - **VLC**: Extensively tested on Desktop and Mobile.
+  - **eezUPnP**: Confirmed working.
+  - **Kodi**: Confirmed working. In certain cases, you might need to start Kodi *first*, then start UPnP Kino.
 
-# How does it work?
-Press the "Movies" or "Music" library icon to select the folder/folders containing your video files and/or audio files. Connect to WiFi and press "Start UPnP Kino".
+## Permissions Explained
+- **Local Network**: Required to find and connect to players on your WiFi.
+- **Media Access**: Needed to read the files you choose to share. On Android 14+, you can grant access to specific files only.
+- **Notifications**: Used to show server status and provide quick-stop controls.
+- **Wake Lock**: Prevents the stream from dropping if the phone enters deep sleep.
 
-<img src="https://github.com/naive-HA/UpnpKino/blob/main/fastlane/metadata/android/en-US/images/phoneScreenshots/1.png" alt="UPnP Kino" height="400">  
-
-Then open your UPnP compatible video player, like VLC, and navigate to "Browse" on another WiFi connected phone or tablet, or "View/Playlist/Universal Plug'n'Play" on a desktop and enjoy your videos. The app has been extensively tested with VLC but other UPnP players should work just fine.
-
-So far, UPnP Kino has been tested and confirmed working with VLC:
-[<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/desktopVLC.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/desktopVLC.png)
-
-[<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/mobileVLC.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/mobileVLC.png)
-
-eezUPnp
-
-[<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/eezUPnP.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/eezUPnP.png)
-
-and Kodi (in tests, it seems Kodi needs to start first and then UPnP Kino... if you cannot discover UPnP Kino, then either restart UPnP Kino or double tap the big connect icon above the start button)
-
-[<img src="https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/kodi.png" height="380">](https://github.com/naive-HA/UpnpKino/blob/main/hi-res-img/kodi.png)
-
-# Why not just use PlainUPnP (com.m3sv.plainupnp)?
-Well, first of all, it seems that the app has been removed from F-Droid. And, anyway, the app had a bug which made it impossible to stream video files over 2,147,483,647 bytes. Which is just over 2GB. Nowadays, most H264 encoded video files are above 2GB. "UPnP Kino" solves that problem in a fit-for-purpose way. Enjoy!
-
-# Buy me a coffee
-If you like it, remember to donate some satoshi/BTC to:
-
-1HwgShr1TniuBxNQwy2xAhpQaNuZhtw6sh
+## ☕ Support the Project
+If you find this app useful, consider supporting development!
+**BTC Address**: `1HwgShr1TniuBxNQwy2xAhpQaNuZhtw6sh`

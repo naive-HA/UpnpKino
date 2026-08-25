@@ -27,8 +27,9 @@ import acab.naiveha.upnpkino.Constants.Dlna.ActionFeedback
 import acab.naiveha.upnpkino.Constants.Dlna.Action
 import kotlinx.coroutines.delay
 import kotlin.collections.get
+import kotlin.time.Duration.Companion.milliseconds
 
-/*TO DO: polish up the code
+/*TODO: polish up the code
 * do not repeat yourself */
 
 class DlnaActivity : AppCompatActivity() {
@@ -95,7 +96,7 @@ class DlnaActivity : AppCompatActivity() {
                     repo.setLoadingState(true) //show the loading spinner
                     isWaitingForSeek = true //prevent the user from SEEKing again, to allow the remote device catching up
                     lifecycleScope.launch {
-                        delay(2500)
+                        delay(2500.milliseconds)
                         isWaitingForSeek = false
                         repo.setUserIsSeeking(false)
                         repo.setLoadingState(false) //hide the loading spinner
@@ -170,8 +171,22 @@ class DlnaActivity : AppCompatActivity() {
                     true
                 }
 
+                R.id.nav_transcoder -> {
+                    val intent = Intent(this, TranscoderActivity::class.java)
+                    startActivity(intent)
+                    binding.drawerLayout.closeDrawer(GravityCompat.START)
+                    true
+                }
+
                 R.id.nav_licenses -> {
                     val intent = Intent(this, LicensesActivity::class.java)
+                    startActivity(intent)
+                    binding.drawerLayout.closeDrawer(GravityCompat.START)
+                    true
+                }
+
+                R.id.nav_about -> {
+                    val intent = Intent(this, AboutActivity::class.java)
                     startActivity(intent)
                     binding.drawerLayout.closeDrawer(GravityCompat.START)
                     true
@@ -180,6 +195,7 @@ class DlnaActivity : AppCompatActivity() {
                 else -> false
             }
         }
+        binding.navView.setCheckedItem(R.id.nav_dlna)
         binding.mediaFile.setOnClickListener {
             val devices = repo.devices.value
             val selectedDeviceId = repo.selectedDeviceId.value
@@ -192,9 +208,9 @@ class DlnaActivity : AppCompatActivity() {
                         .show(supportFragmentManager, "Selector")
                 }
             } else if (UpnpRepository.kinoService.sharedMediaCollection.value.isEmpty()) {
-                Toast.makeText(this, "Start UPnP Kino first", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.error_start_service_first), Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this, "Select a DLNA device first", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.error_select_dlna_first), Toast.LENGTH_SHORT).show()
             }
         }
         lifecycleScope.launch {

@@ -14,13 +14,13 @@ data class ChromecastNodeModel(
     override val iconResId:      Int     get() = R.drawable.chromecast
     override val isContainer:    Boolean get() = false
 
-    var mediaCollection: Map<String, Configuration.MediaNode> = emptyMap()
+    var mediaCollection: Map<String, MediaCollection.MediaNode> = emptyMap()
         private set
 
-    fun setMediaCollection(collection: Map<String, Configuration.MediaNode>) {
+    fun setMediaCollection(collection: Map<String, MediaCollection.MediaNode>) {
         val filtered = collection.toMutableMap()
         val idsToRemove = filtered.filter { (_, node) ->
-            node is Configuration.MediaNode.Item && false //node.chromecastTranscoding
+            node is MediaCollection.MediaNode.Item && false //node.chromecastTranscoding
         }.keys.toSet()
 
         for (id in idsToRemove) {
@@ -28,7 +28,7 @@ data class ChromecastNodeModel(
         }
 
         for ((id, node) in filtered) {
-            if (node is Configuration.MediaNode.Container) {
+            if (node is MediaCollection.MediaNode.Container) {
                 val newChildren = node.children.filter { it !in idsToRemove }
                 if (newChildren.size != node.children.size) {
                     filtered[id] = node.copy(children = newChildren)
@@ -41,7 +41,7 @@ data class ChromecastNodeModel(
             modified = false
             val nodesToRemove = mutableListOf<String>()
             for ((id, node) in filtered) {
-                if (node is Configuration.MediaNode.Container && node.children.isEmpty() && id != "0" && id != "1") {
+                if (node is MediaCollection.MediaNode.Container && node.children.isEmpty() && id != "0" && id != "1") {
                     nodesToRemove.add(id)
                     modified = true
                 }
@@ -49,7 +49,7 @@ data class ChromecastNodeModel(
             for (idToRemove in nodesToRemove) {
                 filtered.remove(idToRemove)
                 for ((id, node) in filtered) {
-                    if (node is Configuration.MediaNode.Container && node.children.contains(idToRemove)) {
+                    if (node is MediaCollection.MediaNode.Container && node.children.contains(idToRemove)) {
                         val newChildren = node.children.toMutableList()
                         newChildren.remove(idToRemove)
                         filtered[id] = node.copy(children = newChildren)

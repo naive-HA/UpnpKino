@@ -98,7 +98,7 @@ class MulticastServer(private val upnpService: UpnpService) {
                     
                     val currentInetAddress = upnpService.configuration.getInetAddress()
                     if (packet.address != currentInetAddress && !packet.address.isLoopbackAddress) {
-                        Log.v("MulticastServer", "Received packet from ${packet.address}:${packet.port}")
+//                        Log.v("MulticastServer", "Received packet from ${packet.address}:${packet.port}")
                         val inputStream = ByteArrayInputStream(packet.data, 0, packet.length)
                         val headers = mutableListOf<String>()
                         while (true) {
@@ -108,11 +108,11 @@ class MulticastServer(private val upnpService: UpnpService) {
                         }
                         if (headers.isNotEmpty()) {
                             val requestPayload = headers.joinToString("\n")
-                            Log.v("MulticastServer", "Multicast request headers:\n$requestPayload")
+//                            Log.v("MulticastServer", "Multicast request headers:\n$requestPayload")
                             val responses = upnpService.upnpMessages.parseUpnpMulticastRequest(requestPayload)
                             for (response in responses) {
                                 val responseData = response.toByteArray(Charsets.UTF_8)
-                                Log.v("MulticastServer", "Responding to ${packet.address}:${packet.port}")
+//                                Log.v("MulticastServer", "Responding to ${packet.address}:${packet.port}")
                                 //respond to the address and port
                                 socket?.send(
                                     DatagramPacket(
@@ -134,7 +134,7 @@ class MulticastServer(private val upnpService: UpnpService) {
                 while (true) {
                     val notification = outboundMessages.tryReceive().getOrNull() ?: break
                     try {
-                        Log.v("MulticastServer", "Sending outbound notification from queue")
+//                        Log.v("MulticastServer", "Sending outbound notification from queue")
                         val notificationData = notification.toByteArray(Charsets.UTF_8)
                         val notifyPacket = DatagramPacket(
                             notificationData,

@@ -37,7 +37,13 @@
             android:name=".DlnaActivity"
             android:exported="false" />
         <activity
+            android:name=".TranscoderActivity"
+            android:exported="false" />
+        <activity
             android:name=".LicensesActivity"
+            android:exported="false" />
+        <activity
+            android:name=".AboutActivity"
             android:exported="false" />
         <activity
             android:name=".MainActivity"

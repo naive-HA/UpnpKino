@@ -33,7 +33,7 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
             }
             true
         } catch (e: Exception) {
-            Log.w("UpnpMessages", "isXmlValid: invalid XML structure", e)
+            Log.w("UpnpMessages", "isXmlValid: invalid XML:\n$xml", e)
             false
         }
     }
@@ -747,6 +747,7 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
             Log.w("UpnpMessages", "parseDlnaResponse: invalid XML input")
             return responseData
         }
+        Log.w("UpnpMessages", "parseDlnaResponse: $xml")
         try {
             val parser = Xml.newPullParser()
             parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
@@ -755,7 +756,7 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
             while (eventType != XmlPullParser.END_DOCUMENT) {
                 if (eventType == XmlPullParser.START_TAG) {
                     val name = parser.name.substringAfter(":")
-                    if (name in listOf("TrackDuration", "RelTime", "CurrentURI", "CurrentTransportState", "CurrentTransportStatus", "CurrentSpeed")) {
+                    if (name in listOf("TrackDuration", "RelTime", "CurrentURI", "CurrentTransportState", "CurrentTransportStatus", "CurrentSpeed", "Sink")) {
                         val text = parser.nextText()
                         responseData[name] = text
                     }
@@ -838,16 +839,16 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
         var totalMatches = 0
         val sharedMediaCollection = UpnpRepository.kinoService.sharedMediaCollection.value
         val node = sharedMediaCollection[objectID] ?: return upnpError("Cannot process the request. Malformed request")
-        if (browseFlag == "BrowseDirectChildren" && node is Configuration.MediaNode.Container) {
+        if (browseFlag == "BrowseDirectChildren" && node is MediaCollection.MediaNode.Container) {
             val objectContents = node.children
             for (id in objectContents) {
-                if (sharedMediaCollection[id] is Configuration.MediaNode.Container && totalMatches != requestedCount) {
+                if (sharedMediaCollection[id] is MediaCollection.MediaNode.Container && totalMatches != requestedCount) {
                     metadata += metadataValues(id, objectID)
                     totalMatches += 1
                 }
             }
             for (id in objectContents) {
-                if (sharedMediaCollection[id] is Configuration.MediaNode.Item && totalMatches != requestedCount) {
+                if (sharedMediaCollection[id] is MediaCollection.MediaNode.Item && totalMatches != requestedCount) {
                     metadata += metadataValues(id, objectID)
                     totalMatches += 1
                 }
@@ -882,14 +883,14 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
         val sharedMediaCollection = UpnpRepository.kinoService.sharedMediaCollection.value
         val node = sharedMediaCollection[objectID] ?: return ""
         var metadata = String()
-        if (node is Configuration.MediaNode.Container) {
+        if (node is MediaCollection.MediaNode.Container) {
             metadata += listOf(
                 "&lt;container id=\"$objectID\" parentID=\"$parentID\" childCount=\"${node.children.size}\" restricted=\"1\" searchable=\"1\"&gt;",
                 "&lt;dc:title&gt;${node.name.xmlEscape()}&lt;/dc:title&gt;",
                 "&lt;upnp:writeStatus&gt;NOT_WRITABLE&lt;/upnp:writeStatus&gt;",
                 "&lt;upnp:class&gt;object.container&lt;/upnp:class&gt;",
                 "&lt;/container&gt;").joinToString("")
-        } else if (node is Configuration.MediaNode.Item) {
+        } else if (node is MediaCollection.MediaNode.Item) {
             val fileExtension = node.name.substringAfterLast('.', "").lowercase()
             metadata += listOf(
                 "&lt;item id=\"$objectID\" parentID=\"$parentID\" restricted=\"0\"&gt;",
@@ -925,16 +926,11 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
             "</s:Envelope>").joinToString("")
 
     }
-    data class UpnpDeviceDescription(
-        val friendlyName: String,
-        val urlBase: String?,
-        val controlUrls: Map<String, String>,
-        val eventUrls: Map<String, String>
-    )
-
-    fun parseUpnpDescription(description: String): UpnpDeviceDescription? {
+    fun parseUpnpDescription(description: String): UpnpNodeModel? {
         var friendlyName = ""
         var urlBase: String? = null
+        val services = listOf("AVTransport", "RenderingControl", "ConnectionManager")
+        val serviceUrns = mutableMapOf<String, String>()
         val controlUrls = mutableMapOf<String, String>()
         val eventUrls = mutableMapOf<String, String>()
         if (!isXmlValid(description)) {
@@ -964,18 +960,11 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
                                         "eventSubURL" -> eventSubURL = parser.nextText()
                                     }
                                 }
-                                when (serviceType) {
-                                    Constants.Dlna.URN.AV_TRANSPORT -> {
-                                        controlUrls["AVTransport"] = controlURL
-                                        eventUrls["AVTransport"] = eventSubURL
-                                    }
-                                    Constants.Dlna.URN.RENDERING_CONTROL -> {
-                                        controlUrls["RenderingControl"] = controlURL
-                                        eventUrls["RenderingControl"] = eventSubURL
-                                    }
-                                    Constants.Dlna.URN.CONNECTION_MANAGER -> {
-                                        controlUrls["ConnectionManager"] = controlURL
-                                        eventUrls["ConnectionManager"] = eventSubURL
+                                for (service in services) {
+                                    if (service in serviceType){
+                                        serviceUrns[service] = serviceType
+                                        controlUrls[service] = controlURL
+                                        eventUrls[service] = eventSubURL
                                     }
                                 }
                             }
@@ -991,17 +980,18 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
             Log.w("UpnpMessages", "parseUpnpDescription: missing critical fields (name=$friendlyName, controls=${controlUrls.size}, events=${eventUrls.size})")
             return null
         }
-        return UpnpDeviceDescription(friendlyName, urlBase, controlUrls, eventUrls)
+        return UpnpNodeModel(friendlyName, urlBase, serviceUrns, controlUrls, eventUrls)
     }
-    fun draftDlnaMessage(action: String, args: Map<String, String>, mediaCollection: Map<String, Configuration.MediaNode>): String{
+    fun draftDlnaMessage(command: String, serviceUrn: String, args: Map<String, String>, mediaCollection: Map<String, MediaCollection.MediaNode>): String{
         var fields = String()
-        when (action){
+        when (command){
             "SetAVTransportURI" -> {
                 val fileId = args["fileId"]
-                val mediaFile = fileId?.let { mediaCollection[it] } as? Configuration.MediaNode.Item
+                val mediaFile = fileId?.let { mediaCollection[it] } as? MediaCollection.MediaNode.Item
                 val fileExtension = mediaFile?.name?.substringAfterLast(".")
                 val itemUrl = mediaFile?.url?.xmlEscape() ?: ""
                 fields = listOf(
+                    "<InstanceID>0</InstanceID>",
                     "<CurrentURI>$itemUrl</CurrentURI>",
                     "<CurrentURIMetaData>",
                     "&lt;DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\"&gt;",
@@ -1014,45 +1004,58 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
                     "</CurrentURIMetaData>").joinToString("")
             }
             "Play" -> {
-                fields = "<Speed>1</Speed>"
+                fields = listOf(
+                    "<InstanceID>0</InstanceID>",
+                    "<Speed>1</Speed>").joinToString("")
             }
             "Seek" -> {
                 val target = args["Target"]
                 fields = listOf(
+                    "<InstanceID>0</InstanceID>",
                     "<Unit>REL_TIME</Unit>",
                     "<Target>$target</Target>").joinToString("")
             }
             "Pause" -> {
-                fields = ""
+                fields = listOf(
+                    "<InstanceID>0</InstanceID>").joinToString("")
             }
             "Stop" -> {
-                fields = ""
+                fields = listOf(
+                    "<InstanceID>0</InstanceID>").joinToString("")
             }
             "GetMediaInfo" -> {
-                fields = ""
+                fields = listOf(
+                    "<InstanceID>0</InstanceID>").joinToString("")
             }
             "GetPositionInfo" -> {
-                fields = "" // Retrieves current playback position
+                fields = listOf(
+                    "<InstanceID>0</InstanceID>").joinToString("")
             }
             "GetTransportInfo" -> {
-                fields = "" // Queries the current transport state (e.g., Playing, Paused, Stopped, Transitioning)
+                fields = listOf(
+                    "<InstanceID>0</InstanceID>").joinToString("")
             }
             "SetBrightness" -> {
                 val target = args["DesiredBrightness"]
-                fields = "<DesiredBrightness>$target</DesiredBrightness>"
+                fields = listOf(
+                    "<InstanceID>0</InstanceID>",
+                    "<DesiredBrightness>$target</DesiredBrightness>").joinToString("")
+            }
+            "GetProtocolInfo" -> {
+                fields = ""
             }
         }
         return listOf(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
             "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">",
             "<s:Body>",
-            "<u:$action xmlns:u=\"${Constants.Dlna.getURN(action)}\">",
-            "<InstanceID>0</InstanceID>",
+            "<u:$command xmlns:u=\"$serviceUrn\">",
             fields,
-            "</u:$action>",
+            "</u:$command>",
             "</s:Body>",
             "</s:Envelope>").joinToString("")
     }
+
     fun parseDlnaEvent(xml: String): Map<String, String> {
         val eventData = mutableMapOf<String, String>()
         try {

@@ -175,7 +175,7 @@ class HttpServer(private val context: Context, val upnpService: UpnpService) {
                                 val targetName = path.substringBeforeLast('/').substringAfterLast('/')
                                 val node = sharedMediaCollection[targetName]
 
-                                if (node !is Configuration.MediaNode.Item) {
+                                if (node !is MediaCollection.MediaNode.Item) {
                                     Log.w("HttpServer", "Node not found or not an item for target: $targetName")
                                     response.status = HttpStatus.METHOD_NOT_ALLOWED_405
                                     callback.succeeded()
@@ -191,9 +191,9 @@ class HttpServer(private val context: Context, val upnpService: UpnpService) {
                                 }
 
                                 try {
-                                    Log.v("HttpServer", "Serving media item: name=${node.name} size=${node.size} mime=${node.mimeType}")
                                     context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                                        val fileSize = node.size
+                                        val fileSize = Constants.getFileSize(pfd)
+                                        Log.v("HttpServer", "Serving media item: name=${node.name} size=$fileSize mime=${node.mimeType}")
                                         val rangeHeader = request.headers.get(HttpHeader.RANGE.asString())
                                         val mimeType = node.mimeType
 
@@ -264,7 +264,7 @@ class HttpServer(private val context: Context, val upnpService: UpnpService) {
                                             if (!documentFile.exists()) {
                                                 Log.w("HttpServer", "Shared file no longer exists: $uri")
                                                 android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                                    android.widget.Toast.makeText(context, "Error: Shared file not found. Stopping service...", android.widget.Toast.LENGTH_LONG).show()
+                                                    android.widget.Toast.makeText(context, context.getString(R.string.error_file_not_found), android.widget.Toast.LENGTH_LONG).show()
                                                     upnpService.stopSelf()
                                                 }
                                             }

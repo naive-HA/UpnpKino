@@ -14,6 +14,14 @@ class Preferences(val context: Context) {
         private const val LOCAL_MOVIE_FOLDER_URI = "local_movie_folder_uri"
         private const val LOCAL_MUSIC_FOLDER_URI = "local_music_folder_uri"
         private const val DEVICE_UUID = "device_uuid"
+        private const val TRANSCODER_CAPABILITIES = "transcoder_capabilities"
+    }
+
+    fun saveTranscoderCapabilities(json: String) {
+        sharedPreferences.edit { putString(TRANSCODER_CAPABILITIES, json) }
+    }
+    fun getTranscoderCapabilities(): String? {
+        return sharedPreferences.getString(TRANSCODER_CAPABILITIES, null)
     }
 
     fun getDeviceUuid(): String {

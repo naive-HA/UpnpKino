@@ -158,7 +158,14 @@ class ChromecastActivity : AppCompatActivity() {
 //                    binding.drawerLayout.closeDrawer(GravityCompat.START)
 //                    true
 //                }
+//
 //                R.id.nav_chromecast -> {
+                    binding.drawerLayout.closeDrawer(GravityCompat.START)
+                    true
+                }
+                R.id.nav_transcoder -> {
+                    val intent = Intent(this, TranscoderActivity::class.java)
+                    startActivity(intent)
                     binding.drawerLayout.closeDrawer(GravityCompat.START)
                     true
                 }
@@ -168,9 +175,16 @@ class ChromecastActivity : AppCompatActivity() {
                     binding.drawerLayout.closeDrawer(GravityCompat.START)
                     true
                 }
+                R.id.nav_about -> {
+                    val intent = Intent(this, AboutActivity::class.java)
+                    startActivity(intent)
+                    binding.drawerLayout.closeDrawer(GravityCompat.START)
+                    true
+                }
                 else -> false
             }
         }
+//        binding.navView.setCheckedItem(R.id.nav_chromecast)
         binding.mediaFile.setOnClickListener {
             val devices = repo.devices.value
             val selectedDeviceId = repo.selectedDeviceId.value
@@ -183,9 +197,9 @@ class ChromecastActivity : AppCompatActivity() {
                         .show(supportFragmentManager, "Selector")
                 }
             } else if (UpnpRepository.kinoService.sharedMediaCollection.value.isEmpty()) {
-                Toast.makeText(this, "Start UPnP Kino first", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.error_start_service_first), Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this, "Select a Chromecast device first", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.error_select_chromecast_first), Toast.LENGTH_SHORT).show()
             }
         }
         lifecycleScope.launch {

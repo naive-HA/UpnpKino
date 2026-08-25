@@ -9,24 +9,110 @@
     <string name="previous">Previous</string>
     <string name="start_chromecast">Start Chromecast</string>
     <string name="chromecast_info_title">Compatibility Info</string>
-    <string name="chromecast_info_message">Not all video formats can be natively played by a Chromecast device. Some video formats need transcoding into a supported codec. Other need transcoding just the audio track. As of now, UPnP Kino cannot transcode video or audio. As such, those media files are not displayed as available for streaming. In a future version, compatibility might be extended. Remember to donate to support development</string>
+    <string name="chromecast_info_message">Not all video formats can be natively played by a Chromecast device.
+        Some video formats need transcoding into a supported codec.
+        Other need transcoding just the audio track.
+        As of now, UPnP Kino cannot transcode video or audio.
+        As such, those media files are not displayed as available for streaming.
+        In a future version, compatibility might be extended.
+        Remember to donate to support development</string>
     <string name="dlna_info_title">DLNA Info</string>
-    <string name="dlna_info_message">UPnP/DLNA playback depends on the capabilities of the rendering device. Some devices may not support all formats or may have limitations with certain codecs. Ensure your DLNA renderer is on the same network and correctly configured.</string>
+    <string name="dlna_info_message">UPnP/DLNA playback depends on the capabilities of the rendering device.
+        Some devices may not support all formats or may have limitations with certain codecs.
+        Ensure your DLNA renderer is on the same network and correctly configured.</string>
+    <string name="transcoder_info_title">Transcoder Info</string>
+    <string name="transcoder_info_message">Experimental Transcoding. Enjoy!</string>
     <string name="info_content_description">Show compatibility information</string>
     <string name="menu_licenses">Licenses</string>
-    <string name="licenses_details">UPnP Kino by naiveHA is licensed under Apache-2.0\nSource code is found at: https://github.com/naive-HA/UpnpKino\nThe license is found at: https://github.com/naive-HA/UpnpKino/blob/main/LICENSE\n\nDLNA (Digital Living Network Alliance) and the DLNA logo are trademarks of the Digital Living Network Alliance. This project is not affiliated with, endorsed by, or sponsored by the Digital Living Network Alliance. All references to DLNA are for descriptive and interoperability purposes only. No copyright or trademark claims are made to DLNA or any related intellectual property.\n\nChromecast is a trademark of Google LLC. This project is not affiliated with, endorsed by, or sponsored by Google LLC. All references to Chromecast are for descriptive and interoperability purposes only. No copyright or trademark claims are made to Chromecast or any related Google intellectual property.\n\nThis software uses libraries from the FFmpeg project under the LGPLv2.1. This project is not affiliated with, endorsed by, or sponsored by FFmpeg. All references to FFmpeg are for descriptive and interoperability purposes only. No copyright or trademark claims are made to FFmpeg or any related intellectual property. FFmpeg source code can be found at: https://ffmpeg.org/download.html\n\n...\n\nThis software uses zlib licensed \"as-is\". This project is not affiliated with, endorsed by, or sponsored by zlib. All references to zlib are for descriptive and interoperability purposes only. No copyright or trademark claims are made to zlib or any related intellectual property. zlib source code can be found at: https://www.zlib.net\n\nThis software uses FreeType licensed FTL. This project is not affiliated with, endorsed by, or sponsored by FreeType. All references to FreeType are for descriptive and interoperability purposes only. No copyright or trademark claims are made to FreeType or any related intellectual property. FreeType source code can be found at: https://freetype.org\n\nThis software uses HarfBuzz licensed under the so-called "Old MIT" license. This project is not affiliated with, endorsed by, or sponsored by HarfBuzz. All references to HarfBuzz are for descriptive and interoperability purposes only. No copyright or trademark claims are made to HarfBuzz or any related intellectual property. HarfBuzz source code can be found at: https://github.com/harfbuzz/harfbuzz\n\nThis software uses GNU FriBidi licensed under LGPL-2.1 license. This project is not affiliated with, endorsed by, or sponsored by GNU FriBidi. All references to GNU FriBidi are for descriptive and interoperability purposes only. No copyright or trademark claims are made to GNU FriBidi or any related intellectual property. GNU FriBidi source code can be found at: https://github.com/fribidi/fribidi\n\nThis software uses libass licensed under ISC license. This project is not affiliated with, endorsed by, or sponsored by libass. All references to libass are for descriptive and interoperability purposes only. No copyright or trademark claims are made to libass or any related intellectual property. libass source code can be found at: https://github.com/libass/libass</string>
+    <string name="licenses_details">UPnP Kino by naiveHA is licensed under Apache-2.0\nSource code is found at: https://github.com/naive-HA/UpnpKino\n
+        The license is found at: https://github.com/naive-HA/UpnpKino/blob/main/LICENSE\n\n
+        DLNA (Digital Living Network Alliance) and the DLNA logo are trademarks of the Digital Living Network Alliance.
+        This project is not affiliated with, endorsed by, or sponsored by the Digital Living Network Alliance.
+        All references to DLNA are for descriptive and interoperability purposes only.
+        No copyright or trademark claims are made to DLNA or any related intellectual property.\n\n
+        Chromecast is a trademark of Google LLC. This project is not affiliated with, endorsed by, or sponsored by Google LLC.
+        All references to Chromecast are for descriptive and interoperability purposes only.
+        No copyright or trademark claims are made to Chromecast or any related Google intellectual property.\n\n
+        This software uses libraries from the FFmpeg project under the LGPLv2.1.
+        This project is not affiliated with, endorsed by, or sponsored by FFmpeg.
+        All references to FFmpeg are for descriptive and interoperability purposes only.
+        No copyright or trademark claims are made to FFmpeg or any related intellectual property.
+        FFmpeg source code can be found at: https://ffmpeg.org/download.html\n\n
+        This software uses zlib licensed \"as-is\". This project is not affiliated with, endorsed by, or sponsored by zlib.
+        All references to zlib are for descriptive and interoperability purposes only.
+        No copyright or trademark claims are made to zlib or any related intellectual property.
+        zlib source code can be found at: https://www.zlib.net\n\n
+        This software uses FreeType licensed FTL.
+        This project is not affiliated with, endorsed by, or sponsored by FreeType.
+        All references to FreeType are for descriptive and interoperability purposes only.
+        No copyright or trademark claims are made to FreeType or any related intellectual property.
+        FreeType source code can be found at: https://freetype.org\n\n
+        This software uses HarfBuzz licensed under the so-called "Old MIT" license.
+        This project is not affiliated with, endorsed by, or sponsored by HarfBuzz.
+        All references to HarfBuzz are for descriptive and interoperability purposes only.
+        No copyright or trademark claims are made to HarfBuzz or any related intellectual property.
+        HarfBuzz source code can be found at: https://github.com/harfbuzz/harfbuzz\n\n
+        This software uses GNU FriBidi licensed under LGPL-2.1 license.
+        This project is not affiliated with, endorsed by, or sponsored by GNU FriBidi.
+        All references to GNU FriBidi are for descriptive and interoperability purposes only.
+        No copyright or trademark claims are made to GNU FriBidi or any related intellectual property.
+        GNU FriBidi source code can be found at: https://github.com/fribidi/fribidi\n\n
+        This software uses libass licensed under ISC license.
+        This project is not affiliated with, endorsed by, or sponsored by libass.
+        All references to libass are for descriptive and interoperability purposes only.
+        No copyright or trademark claims are made to libass or any related intellectual property.
+        libass source code can be found at: https://github.com/libass/libass\n\n
+        The FFmpeg and FFprobe binaries were compiled with the script found at: https://raw.githubusercontent.com/naive-HA/UpnpKino/refs/heads/main/app/src/main/jniLibs/arm64-v8a/build_libffmpeg_for_android_gpl_free.sh
+        from the source code found at: https://github.com/naive-HA/UpnpKino/tree/main/ffmpeg6</string>
 
     <string name="version_info">UPnP Kino by naiveHA %1$s\nhttps://github.com/naive-HA/UpnpKino</string>
     <string name="stop_upnp_kino">Stop UPnP Kino</string>
     <string name="start_upnp_kino">Start UPnP Kino</string>
     <string name="status_not_running">UPnP Kino is not running\nStart UPnP Kino to discover devices</string>
     <string name="status_not_discovered">Devices not discovered yet\nStart a search</string>
-    <string name="status_starting">UPnP Kino is starting\nPlease wait...</string>
-    <string name="status_searching">Searching for devices\nPlease wait...</string>
+    <string name="status_starting">UPnP Kino is starting\nPlease wait…</string>
+    <string name="status_searching">Searching for devices\nPlease wait…</string>
     <string name="status_no_device_selected">No device selected\nSearch again</string>
     <string name="status_no_devices_found">No devices found\nSearch again</string>
     <string name="status_tap_to_select">Tap to select media file\n</string>
     <string name="status_error">Something went wrong\nCheck your device and try again</string>
     <string name="device_info_format">%1$s\n%2$s</string>
     <string name="default_time">00:00:00</string>
+    <string name="status">\n</string>
+    <string name="status_indexing">Indexing file %1$d of %2$d\n</string>
+    <string name="notification_running">Running on %1$s</string>
+    <string name="notification_starting">Starting servers…</string>
+    <string name="permissions_required">Permissions are required for the app to function properly: %1$s</string>
+    <string name="music_library">Music library</string>
+    <string name="video_library">Video library</string>
+    <string name="select_folder">Select folder</string>
+    <string name="toast_video_library_cleared">Video library cleared</string>
+    <string name="toast_music_library_cleared">Music library cleared</string>
+    <string name="toast_reannouncing">Re-announcing the server to the network</string>
+    <string name="error_network_disconnected">Error: Network disconnected. Reconnect WiFi and restart the service</string>
+    <string name="error_memory_low">Error: Memory low. Shutting down…</string>
+    <string name="error_file_not_found">Error: Shared file not found. Stopping service…</string>
+    <string name="error_start_service_first">Start UPnP Kino first</string>
+    <string name="error_select_chromecast_first">Select a Chromecast device first</string>
+    <string name="error_select_dlna_first">Select a DLNA device first</string>
+    <string name="open_menu">Open menu</string>
+    <string name="cast_icon_description">Cast icon</string>
+    <string name="loading_indicator_description">Loading indicator</string>
+    <string name="stop_button_description">Stop</string>
+    <string name="play_button_description">Play</string>
+    <string name="menu_about">About</string>
+    <string name="menu_transcoder">Transcoder</string>
+    <string name="about_details">UPnP Kino by naiveHA\nUncomplicatedly simple: stream your media library (video and audio) directly from your Android device to any UPnP/DLNA compatible player.\n\n
+        Features\n
+        - Wide Format Support: Stream video (mp4, mkv, mov, webm) and audio (mp3, m4a, aac, flac, wav, opus).\n
+        - Large File Support: Unlike other legacy apps, UPnP Kino handles files larger than 2GB (perfect for high-quality H264 encodes).\n
+        - Background Streaming: Keeps the media server running even when the screen is off or you\'re using other apps.\n
+        - Modern Backend: Built on Eclipse Jetty 12 for reliable performance.\n
+        - Privacy Focused: No tracking, no unnecessary permissions.\n\n
+        Compatibility\n
+        - Device Requirements: Android 8.0 (API 26) or higher.\n
+        - Tested Players:\n
+          - VLC: Extensively tested on Desktop and Mobile.\n
+          - eezUPnP: Confirmed working.\n
+          - Kodi: Confirmed working. In certain cases, you might need to start Kodi first, then start UPnP Kino.</string>
 </resources>
