@@ -118,18 +118,18 @@ object Constants {
 //            const val CONNECTION_MANAGER = "urn:schemas-upnp-org:service:ConnectionManager:1"
 //            const val RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 //        }
-        object Action {
-            const val SET_AV_TRANSPORT_URI = "SetAVTransportURI"
-            const val PLAY = "Play"
-            const val PAUSE = "Pause"
-            const val SEEK = "Seek"
-            const val STOP = "Stop"
-            const val STOP_LOCAL = "StopLocal"
-            const val GET_MEDIA_INFO = "GetMediaInfo"
-            const val GET_POSITION_INFO = "GetPositionInfo"
-            const val GET_TRANSPORT_INFO = "GetTransportInfo"
-            const val GET_PROTOCOL_INFO = "GetProtocolInfo"
-            const val ERROR = "Error"
+        enum class Action(val actionName: String, val service: String, val responseName: String) {
+            SET_AV_TRANSPORT_URI("SetAVTransportURI", Service.AV_TRANSPORT, "SetAVTransportURIResponse"),
+            PLAY("Play", Service.AV_TRANSPORT, "PlayResponse"),
+            PAUSE("Pause", Service.AV_TRANSPORT, "PauseResponse"),
+            SEEK("Seek", Service.AV_TRANSPORT, "SeekResponse"),
+            STOP("Stop", Service.AV_TRANSPORT, "StopResponse"),
+            STOP_LOCAL("StopLocal", "", ""), // local-only pseudo-action, never sent over the wire
+            GET_MEDIA_INFO("GetMediaInfo", Service.AV_TRANSPORT, "GetMediaInfoResponse"),
+            GET_POSITION_INFO("GetPositionInfo", Service.AV_TRANSPORT, "GetPositionInfoResponse"),
+            GET_TRANSPORT_INFO("GetTransportInfo", Service.AV_TRANSPORT, "GetTransportInfoResponse"),
+            GET_PROTOCOL_INFO("GetProtocolInfo", Service.CONNECTION_MANAGER, "GetProtocolInfoResponse"),
+            ERROR("Error", "", "") // local-only pseudo-action, never sent over the wire
         }
 //        object ActionURN {
 //            const val SET_AV_TRANSPORT_URI = Service.AV_TRANSPORT
@@ -141,17 +141,6 @@ object Constants {
 //            const val GET_POSITION_INFO = Service.AV_TRANSPORT
 //            const val GET_TRANSPORT_INFO = Service.AV_TRANSPORT
 //        }
-        object ActionResponse {
-            const val SET_AV_TRANSPORT_URI = "SetAVTransportURIResponse"
-            const val PLAY = "PlayResponse"
-            const val PAUSE = "PauseResponse"
-            const val SEEK = "SeekResponse"
-            const val STOP = "StopResponse"
-            const val GET_MEDIA_INFO = "GetMediaInfoResponse"
-            const val GET_POSITION_INFO = "GetPositionInfoResponse"
-            const val GET_TRANSPORT_INFO = "GetTransportInfoResponse"
-            const val GET_PROTOCOL_INFO = "GetProtocolInfoResponse"
-        }
         object ActionFeedback {
             const val PLAYING = "PLAYING"
             const val PAUSED_PLAYBACK = "PAUSED_PLAYBACK"
@@ -160,31 +149,12 @@ object Constants {
             const val DISCONNECTED = "DISCONNECTED"
             const val NO_MEDIA_PRESENT = "NO_MEDIA_PRESENT"
         }
-        fun getService(action: String): String = when(action) {
-            Action.SET_AV_TRANSPORT_URI, Action.PLAY, Action.PAUSE,
-            Action.SEEK, Action.STOP, Action.GET_POSITION_INFO,
-            Action.GET_TRANSPORT_INFO, Action.GET_MEDIA_INFO -> Service.AV_TRANSPORT
-            Action.GET_PROTOCOL_INFO -> Service.CONNECTION_MANAGER
-            else -> ""
-        }
 //        fun getURN(action: String): String = when(getService(action)) {
 //            Service.AV_TRANSPORT -> URN.AV_TRANSPORT
 //            Service.CONNECTION_MANAGER -> URN.CONNECTION_MANAGER
 //            Service.RENDERING_CONTROL -> URN.RENDERING_CONTROL
 //            else -> ""
 //        }
-        fun getResponse(action: String): String = when(action) {
-            Action.SET_AV_TRANSPORT_URI -> ActionResponse.SET_AV_TRANSPORT_URI
-            Action.PLAY -> ActionResponse.PLAY
-            Action.PAUSE -> ActionResponse.PAUSE
-            Action.SEEK -> ActionResponse.SEEK
-            Action.STOP -> ActionResponse.STOP
-            Action.GET_MEDIA_INFO -> ActionResponse.GET_MEDIA_INFO
-            Action.GET_POSITION_INFO -> ActionResponse.GET_POSITION_INFO
-            Action.GET_TRANSPORT_INFO -> ActionResponse.GET_TRANSPORT_INFO
-            Action.GET_PROTOCOL_INFO -> ActionResponse.GET_PROTOCOL_INFO
-            else -> ""
-        }
     }
     object Chromecast {
         const val MDNS_IP = "224.0.0.251"
@@ -199,21 +169,21 @@ object Constants {
             const val RECEIVER = "urn:x-cast:com.google.cast.receiver"
             const val MEDIA = "urn:x-cast:com.google.cast.media"
         }
-        object Action {
-            const val CONNECT = "CONNECT"
-            const val LAUNCH = "LAUNCH"
-            const val STARTING_UP = "STARTING_UP"
-            const val PING = "PING"
-            const val PONG = "PONG"
-            const val CLOSE = "CLOSE"
-            const val LOAD = "LOAD"
-            const val PLAY = "PLAY"
-            const val PAUSE = "PAUSE"
-            const val STOP = "STOP"
-            const val SEEK = "SEEK"
-            const val SET_VOLUME = "SET_VOLUME"
-            const val GET_STATUS = "GET_STATUS"
-            const val ERROR = "ERROR"
+        enum class Action(val actionName: String, val urn: String) {
+            CONNECT("CONNECT", URN.CONNECTION),
+            LAUNCH("LAUNCH", URN.RECEIVER),
+            STARTING_UP("STARTING_UP", ""), // local-only pseudo-state, never sent over the wire
+            PING("PING", URN.HEARTBEAT),
+            PONG("PONG", URN.HEARTBEAT),
+            CLOSE("CLOSE", URN.CONNECTION),
+            LOAD("LOAD", URN.MEDIA),
+            PLAY("PLAY", URN.MEDIA),
+            PAUSE("PAUSE", URN.MEDIA),
+            STOP("STOP", URN.MEDIA),
+            SEEK("SEEK", URN.MEDIA),
+            SET_VOLUME("SET_VOLUME", URN.RECEIVER),
+            GET_STATUS("GET_STATUS", URN.MEDIA),
+            ERROR("ERROR", "") // local-only pseudo-state, never sent over the wire
         }
         object ActionFeedback {
             const val PLAYING = "PLAYING"
@@ -222,32 +192,13 @@ object Constants {
             const val STOPPED = "STOPPED"
             const val NO_MEDIA_PRESENT = "NO_MEDIA_PRESENT"
         }
-        object ActionURN {
-            const val CONNECT = URN.CONNECTION
-            const val LAUNCH = URN.RECEIVER
-            const val PING = URN.HEARTBEAT
-            const val PONG = URN.HEARTBEAT
-            const val CLOSE = URN.CONNECTION
-            const val LOAD = URN.MEDIA
-            const val PLAY = URN.MEDIA
-            const val PAUSE = URN.MEDIA
-            const val STOP = URN.MEDIA
-            const val STOP_APP = URN.RECEIVER
-            const val SEEK = URN.MEDIA
-            const val SET_VOLUME = URN.RECEIVER
-            const val GET_STATUS = URN.MEDIA
-        }
+        // RECEIVER_STATUS/MEDIA_STATUS/LOAD_FAILED are incoming message types (events or
+        // responses) and don't map 1:1 to a single outgoing Action the way service/urn do,
+        // so unlike Action these stay as plain constants rather than folding into it.
         object ActionResponse {
             const val RECEIVER_STATUS = "RECEIVER_STATUS"
             const val MEDIA_STATUS = "MEDIA_STATUS"
             const val LOAD_FAILED = "LOAD_FAILED"
-        }
-        fun getURN(action: String): String = when(action) {
-            Action.CONNECT, Action.CLOSE -> URN.CONNECTION
-            Action.PING, Action.PONG -> URN.HEARTBEAT
-            Action.LAUNCH, Action.SET_VOLUME -> URN.RECEIVER
-            Action.LOAD, Action.PLAY, Action.PAUSE, Action.STOP, Action.SEEK, Action.GET_STATUS -> URN.MEDIA
-            else -> ""
         }
         object Proto {
             const val VERSION = (1 shl 3) or 0
@@ -262,10 +213,13 @@ object Constants {
         }
     }
     object Transcoder {
+        // Video encoders are MediaCodec-backed (hardware); ffmpegEncoder is the -c:v name.
         enum class VideoCodec(val ffmpegEncoder: String) {
             H264("h264_mediacodec"),
             HEVC("hevc_mediacodec")
         }
+        // Audio encoders are software; testChannels is the channel count each is actually used for
+        // here (AC3 exists specifically to carry 5.1) and what capability checks encode a test tone at.
         enum class AudioCodec(val ffmpegEncoder: String, val testChannels: Int) {
             AAC("aac", 2),
             AC3("ac3", 6)
@@ -275,11 +229,17 @@ object Constants {
             MPEG_TS("mpegts"),
             MKV("matroska")
         }
-        enum class Resolution(val maxWidth: Int, val maxHeight: Int) {
-            SD(720, 576),
-            HD_720(1280, 720),
-            HD_1080(1920, 1080),
-            UHD_4K(3840, 2160)
+        // targetBitrateKbps: a realistic encode bitrate for this resolution class. Used by
+        // capability checks too (not just real transcoding) -- without an explicit -b:v,
+        // ffmpeg's mediacodec wrapper falls back to its own internal default (200kbps),
+        // which is unrealistic at higher resolutions and can make a hardware encoder's own
+        // parameter validation reject the request outright. Testing with the same bitrate
+        // real encoding would actually use avoids that false negative.
+        enum class Resolution(val maxWidth: Int, val maxHeight: Int, val targetBitrateKbps: Int) {
+            SD(720, 576, 1_500),
+            HD_720(1280, 720, 4_000),
+            HD_1080(1920, 1080, 8_000),
+            UHD_4K(3840, 2160, 20_000)
         }
     }
 }

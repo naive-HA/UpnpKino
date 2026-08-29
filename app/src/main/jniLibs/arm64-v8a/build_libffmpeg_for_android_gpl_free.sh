@@ -21,8 +21,17 @@ set -euo pipefail
 #   FreeType 2.14.3 → font rasterisation (required by libass)
 #   HarfBuzz 14.2.0 → text shaping (required by libass)
 #   FriBidi 1.0.16  → Unicode BiDi algorithm (required by libass)
-#   libass 0.17.4   → subtitle burn-in
-#   FFmpeg n8.1     → the binary
+#   libass 0.17.5   → subtitle burn-in (0.17.4 -> 0.17.5: fixes GHSA-pjjp-65r7-ppgm
+#                     and GHSA-5gf7-wjfm-vmvm, both OOB reads in code paths that
+#                     parse untrusted subtitle/Matroska data -- relevant here since
+#                     libass parses whatever track a user's .mkv happens to contain)
+#   FFmpeg n8.1.2   → the binary (n8.1 -> n8.1.2: same 8.1 branch/ABI, ~4 months
+#                     and 100+ stability fixes on top of the initial 8.1.0 tag --
+#                     deliberately NOT jumping to 9.0 "Lei" here: released only
+#                     weeks ago, ABI-breaking, ~2200 commits -- too large a jump
+#                     to make mid-investigation without confounding whatever
+#                     Gate 1/2/3 conclude about Surface-mode with "and we also
+#                     changed ffmpeg major versions." Revisit once that's settled.
 #
 # NDK version
 #   Detected automatically from ~/Android/Sdk/ndk/ (latest installed).
@@ -329,8 +338,8 @@ LIBASS_SRC="$BUILD_DIR/libass"
 
 if [ ! -d "$LIBASS_SRC" ]; then
     echo ""
-    echo ">>> Cloning libass (0.17.4)..."
-    git -c advice.detachedHead=false clone --quiet --depth 1 --branch 0.17.4 \
+    echo ">>> Cloning libass (0.17.5)..."
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch 0.17.5 \
         https://github.com/libass/libass.git "$LIBASS_SRC"
 fi
 
@@ -377,8 +386,8 @@ FFMPEG_SRC="$BUILD_DIR/ffmpeg"
 
 if [ ! -d "$FFMPEG_SRC" ]; then
     echo ""
-    echo ">>> Cloning FFmpeg (n8.1)..."
-    git -c advice.detachedHead=false clone --quiet --depth 1 --branch n8.1 \
+    echo ">>> Cloning FFmpeg (n8.1.2)..."
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch n8.1.2 \
         https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_SRC"
 fi
 
@@ -403,8 +412,8 @@ cd "$FFMPEG_SRC"
     --disable-everything \
     --disable-doc \
     --disable-debug \
-    --disable-avdevice \
-    --disable-devices \
+    --enable-avdevice \
+    --disable-outdevs \
     --disable-network \
     --disable-bzlib \
     --disable-iconv \
@@ -432,7 +441,7 @@ cd "$FFMPEG_SRC"
     --enable-demuxer=srt \
     --enable-demuxer=ass \
     --enable-demuxer=webvtt \
-    --enable-demuxer=lavfi \
+    --enable-indev=lavfi \
     \
     `# ---- Video decoders ----` \
     --enable-decoder=h264 \
@@ -452,6 +461,7 @@ cd "$FFMPEG_SRC"
     --enable-decoder=av1 \
     --enable-decoder=prores \
     --enable-decoder=dnxhd \
+    --enable-decoder=wrapped_avframe \
     \
     `# ---- MediaCodec hardware decoders ----` \
     --enable-mediacodec \
@@ -497,9 +507,10 @@ cd "$FFMPEG_SRC"
     --enable-decoder=webvtt \
     --enable-decoder=text \
     \
-    `# ---- Video encoders (hardware only via MediaCodec) ----` \
+    `# ---- Video encoders (hardware via MediaCodec, plus rawvideo for diagnostics) ----` \
     --enable-encoder=h264_mediacodec \
     --enable-encoder=hevc_mediacodec \
+    --enable-encoder=rawvideo \
     \
     `# ---- Audio encoders ----` \
     --enable-encoder=aac \
@@ -515,6 +526,7 @@ cd "$FFMPEG_SRC"
     --enable-muxer=matroska \
     --enable-muxer=mp4 \
     --enable-muxer=mpegts \
+    --enable-muxer=null \
     \
     `# ---- Parsers ----` \
     --enable-parser=h264 \
@@ -543,6 +555,14 @@ cd "$FFMPEG_SRC"
     --enable-filter=ass \
     --enable-filter=testsrc \
     --enable-filter=sine \
+    --enable-filter=format \
+    --enable-filter=hwupload \
+    \
+    `# ---- MediaCodec hwaccel (decode delegation for -hwaccel mediacodec, distinct` \
+    `#      from the h264_mediacodec/hevc_mediacodec dedicated decoders above --` \
+    `#      needed for the Gate 1b zero-copy decode->surface->encode path) ----` \
+    --enable-hwaccel=h264_mediacodec \
+    --enable-hwaccel=hevc_mediacodec \
     \
     --extra-cflags="-Os -fPIC -I$OUTPUT_DIR/include -Wno-deprecated-declarations -Wno-unused-function" \
     --extra-ldflags="-lm -L$OUTPUT_DIR/lib" \

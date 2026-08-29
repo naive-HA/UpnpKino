@@ -64,7 +64,7 @@ object UpnpRepository {
         val selectedDeviceId = _selectedDeviceId.asStateFlow()
         private val _selectedMediaFileId = MutableStateFlow<String?>(null)
         val selectedMediaFileId = _selectedMediaFileId.asStateFlow()
-        private val _streamingFlag = MutableStateFlow<String?>(null)
+        private val _streamingFlag = MutableStateFlow<Constants.Dlna.Action?>(null)
         val streamingFlag = _streamingFlag.asStateFlow()
         private val _streamingFeedbackFlag = MutableStateFlow<String?>(null)
         val streamingFeedbackFlag = _streamingFeedbackFlag.asStateFlow()
@@ -115,7 +115,7 @@ object UpnpRepository {
             Log.d("UpnpRepository", "DLNA: selectedMediaFileId set to $value")
             _selectedMediaFileId.value = value
         }
-        fun setStreamingFlag(value: String?) {
+        fun setStreamingFlag(value: Constants.Dlna.Action?) {
             Log.d("UpnpRepository", "DLNA: streamingFlag set to $value")
             _streamingFlag.value = value
             if (value == Constants.Dlna.Action.STOP || value == Constants.Dlna.Action.PAUSE || value == Constants.Dlna.Action.ERROR) {
@@ -174,7 +174,7 @@ object UpnpRepository {
         private val _selectedMediaFileId = MutableStateFlow<String?>(null)
         val selectedMediaFileId = _selectedMediaFileId.asStateFlow()
 
-        private val _streamingFlag = MutableStateFlow<String?>(null)
+        private val _streamingFlag = MutableStateFlow<Constants.Chromecast.Action?>(null)
         val streamingFlag = _streamingFlag.asStateFlow()
 
         private val _streamingFeedbackFlag = MutableStateFlow<String?>(null)
@@ -234,7 +234,7 @@ object UpnpRepository {
             _selectedMediaFileId.value = value
         }
 
-        fun setStreamingFlag(value: String?) {
+        fun setStreamingFlag(value: Constants.Chromecast.Action?) {
             Log.d("UpnpRepository", "Chromecast: streamingFlag set to $value")
             _streamingFlag.value = value
             if (value == Constants.Chromecast.Action.STOP || value == Constants.Chromecast.Action.PAUSE || value == Constants.Chromecast.Action.ERROR) {

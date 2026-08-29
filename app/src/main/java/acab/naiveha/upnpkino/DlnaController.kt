@@ -66,29 +66,29 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                         repo.setSelectedDeviceId(null)
                         return@collect
                     }
-                    val command = "GetProtocolInfo"
-                    val controlUrl = device.controlUrls[Constants.Dlna.getService(command)] ?: run {
+                    val command = Action.GET_PROTOCOL_INFO
+                    val controlUrl = device.controlUrls[command.service] ?: run {
                         Log.e("DlnaController", "Service not supported by device")
                         repo.setSelectedDeviceId(null)
                         return@collect
                     }
-                    val serviceUrn = device.serviceUrns[Constants.Dlna.getService(command)] ?: run {
+                    val serviceUrn = device.serviceUrns[command.service] ?: run {
                         Log.e("DlnaController", "Service not supported by device")
                         repo.setSelectedDeviceId(null)
                         return@collect
                     }
                     val fullUrl = resolveUrl(device, controlUrl)
-                    val payload = upnpService.upnpMessages.draftDlnaMessage(command, serviceUrn, mapOf(), device.mediaCollection)
+                    val payload = upnpService.upnpMessages.draftDlnaMessage(command.actionName, serviceUrn, mapOf(), device.mediaCollection)
                     val request = Request.Builder()
                         .url(fullUrl)
                         .post(payload.toRequestBody("text/xml; charset=utf-8".toMediaType()))
-                        .addHeader("SOAPACTION", "\"$serviceUrn#$command\"")
+                        .addHeader("SOAPACTION", "\"$serviceUrn#${command.actionName}\"")
                         .build()
                     client.newCall(request).execute().use { response ->
                         val responseBody = response.body?.string() ?: ""
-                        Log.d("DlnaController", "SOAP command $command response: code=${response.code}")
+                        Log.d("DlnaController", "SOAP command ${command.actionName} response: code=${response.code}")
                         if (response.isSuccessful && responseBody.isNotEmpty()) {
-                            val expectedResponse = Constants.Dlna.getResponse(command)
+                            val expectedResponse = command.responseName
                             if (expectedResponse.isNotEmpty() && upnpService.upnpMessages.parseUpnpHttpRequest(responseBody) == expectedResponse
                             ) {
                                 val responseData = upnpService.upnpMessages.parseDlnaResponse(responseBody)
@@ -189,13 +189,13 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                                     device.setMediaCollection(deviceMediaCollection)
                                     return@collect
                                 } else {
-                                    Log.w("upnpkino", "SOAP command $command failed: dlna response is empty: $responseData")
+                                    Log.w("upnpkino", "SOAP command ${command.actionName} failed: dlna response is empty: $responseData")
                                 }
                             } else {
-                                Log.w("upnpkino", "SOAP command $command failed: not the expected response: $expectedResponse")
+                                Log.w("upnpkino", "SOAP command ${command.actionName} failed: not the expected response: $expectedResponse")
                             }
                         } else {
-                            Log.w("upnpkino", "SOAP command $command failed: code=${response.code} body=$responseBody")
+                            Log.w("upnpkino", "SOAP command ${command.actionName} failed: code=${response.code} body=$responseBody")
                         }
                         repo.setSelectedDeviceId(null)
                     }
@@ -255,10 +255,12 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                                 return@collect
                             } //else ERROR
                         }
+                        else -> {
+                            Log.e("DlnaController", "Error executing streaming command: $streamingFlag")
+                            repo.setStreamingFlag(Action.ERROR)
+                            resetDlnaActivity()
+                        }
                     }
-                    Log.e("DlnaController", "Error executing streaming command: $streamingFlag")
-                    repo.setStreamingFlag(Action.ERROR)
-                    resetDlnaActivity()
                 }
             }
         }
@@ -479,45 +481,45 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         }
         return false
     }
-    private fun sendMediaCommand(command: String, args: Map<String, String>): String? {
+    private fun sendMediaCommand(command: Action, args: Map<String, String>): String? {
         val deviceId = repo.selectedDeviceId.value
         val devices = repo.devices.value
         val device = deviceId?.let { devices?.get(it) } ?: run {
             Log.e("DlnaController", "sendMediaCommand: no device selected")
             return null
         }
-        val soapUrl = device.controlUrls[Constants.Dlna.getService(command)] ?: run {
+        val soapUrl = device.controlUrls[command.service] ?: run {
             Log.e("DlnaController", "sendMediaCommand: service not supported by device")
             return null
         }
-        Log.d("DlnaController", "Sending SOAP command: $command to ${device.friendlyName}")
+        Log.d("DlnaController", "Sending SOAP command: ${command.actionName} to ${device.friendlyName}")
         return try {
             val fullUrl = resolveUrl(device, soapUrl)
-            val serviceUrn = device.serviceUrns[Constants.Dlna.getService(command)] ?: run {
-                Log.e("DlnaController", "Service ${Constants.Dlna.getService(command)} not supported by device")
-                throw Exception("Service ${Constants.Dlna.getService(command)} not supported by device")
+            val serviceUrn = device.serviceUrns[command.service] ?: run {
+                Log.e("DlnaController", "Service ${command.service} not supported by device")
+                throw Exception("Service ${command.service} not supported by device")
             }
-            val payload = upnpService.upnpMessages.draftDlnaMessage(command, serviceUrn, args, device.mediaCollection)
+            val payload = upnpService.upnpMessages.draftDlnaMessage(command.actionName, serviceUrn, args, device.mediaCollection)
             val request = Request.Builder()
                 .url(fullUrl)
                 .post(payload.toRequestBody("text/xml; charset=utf-8".toMediaType()))
-                .addHeader("SOAPACTION", "\"$serviceUrn#$command\"")
+                .addHeader("SOAPACTION", "\"$serviceUrn#${command.actionName}\"")
                 .build()
             client.newCall(request).execute().use { response ->
                 val responseBody = response.body?.string() ?: ""
-                Log.d("DlnaController", "SOAP command $command response: code=${response.code}")
+                Log.d("DlnaController", "SOAP command ${command.actionName} response: code=${response.code}")
                 if (response.isSuccessful && responseBody.isNotEmpty()) {
-                    val expectedResponse = Constants.Dlna.getResponse(command)
+                    val expectedResponse = command.responseName
                     if (expectedResponse.isNotEmpty() && upnpService.upnpMessages.parseUpnpHttpRequest(responseBody) == expectedResponse
                     ) {
                         return responseBody
                     }
                 }
-                Log.w("DlnaController", "SOAP command $command failed: code=${response.code} body=$responseBody")
+                Log.w("DlnaController", "SOAP command ${command.actionName} failed: code=${response.code} body=$responseBody")
                 return null
             }
         } catch (e: Exception) {
-            Log.e("DlnaController", "Exception sending SOAP command: $command", e)
+            Log.e("DlnaController", "Exception sending SOAP command: ${command.actionName}", e)
             repo.setStreamingFlag(Action.ERROR)
             resetDlnaActivity()
             null
@@ -530,8 +532,8 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             ActionFeedback.DISCONNECTED,
             ActionFeedback.NO_MEDIA_PRESENT -> return
         }
-        when (repo.streamingFlag.value) {
-            Action.ERROR -> return
+        if (repo.streamingFlag.value == Action.ERROR) {
+             return
         }
         val selectedDeviceId = repo.selectedDeviceId.value ?: return
         val device = repo.devices.value?.get(selectedDeviceId) ?: return

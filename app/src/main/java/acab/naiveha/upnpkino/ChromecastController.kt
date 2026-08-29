@@ -18,7 +18,6 @@ import javax.net.ssl.*
 import kotlin.collections.set
 import acab.naiveha.upnpkino.Constants.Chromecast.ActionFeedback
 import acab.naiveha.upnpkino.Constants.Chromecast.Action
-import acab.naiveha.upnpkino.Constants.Chromecast.ActionURN
 import acab.naiveha.upnpkino.Constants.Chromecast.SERVICE_TYPE
 import acab.naiveha.upnpkino.Constants.Chromecast.MDNS_IP
 import acab.naiveha.upnpkino.Constants.Chromecast.MDNS_PORT
@@ -39,7 +38,6 @@ import acab.naiveha.upnpkino.Constants.Chromecast.Proto.WIRE_VARINT
 import acab.naiveha.upnpkino.Constants.Chromecast.Proto.WIRE_LEN
 import acab.naiveha.upnpkino.Constants.durationToSeconds
 import acab.naiveha.upnpkino.Constants.secondsToDuration
-import acab.naiveha.upnpkino.Constants.Chromecast.getURN
 import android.annotation.SuppressLint
 import org.json.JSONArray
 import kotlin.time.Duration.Companion.milliseconds
@@ -166,10 +164,12 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
                                 return@collect
                             }
                         }
+                        else -> {
+                            Log.e("ChromecastController", "Error processing command $streamingFlag")
+                            repo.setStreamingFlag(Action.ERROR)
+                            resetChromecastActivity()
+                        }
                     }
-                    Log.e("ChromecastController", "Error processing command $streamingFlag")
-                    repo.setStreamingFlag(Action.ERROR)
-                    resetChromecastActivity()
                 }
             }
         }
@@ -187,7 +187,7 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
                                 stopPlaying()
                             }
                         }
-                        Action.ERROR -> {
+                        Action.ERROR.actionName -> {
                             Log.e("ChromecastController", "Feedback reported error")
                             stopPlaying()
                         }
@@ -259,10 +259,10 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
                 cScope.launch { readLoop(sock, signal) }
                 cScope.launch { heartbeatLoop(signal) }
                 Log.v("ChromecastController", "Sending CONNECT and LAUNCH messages")
-                if (!send(RECEIVER_ID, ActionURN.CONNECT, connectJson())){
+                if (!send(RECEIVER_ID, Action.CONNECT.urn, connectJson())){
                     throw Exception("Connect failed")
                 }
-                if (!send(RECEIVER_ID, ActionURN.LAUNCH,   launchJson())){
+                if (!send(RECEIVER_ID, Action.LAUNCH.urn,   launchJson())){
                     throw Exception("Launch failed")
                 }
             } catch (e: CancellationException) {
@@ -278,12 +278,12 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
     }
     private fun connectJson(): String {
         return JSONObject().apply {
-            put("type", Action.CONNECT)
+            put("type", Action.CONNECT.actionName)
             put("userAgent", Constants.userAgent) }.toString()
     }
     private fun launchJson(): String {
         return JSONObject().apply {
-            put("type", Action.LAUNCH)
+            put("type", Action.LAUNCH.actionName)
             put("requestId", nextReqId())
             put("appId", Constants.Chromecast.APP_ID) }.toString()
     }
@@ -391,8 +391,8 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
             RECEIVER -> handleDeviceEvent(msg.payload)
             MEDIA -> handleMediaEvent(msg.payload)
             HEARTBEAT -> handleHeartbeat(msg.payload)
-            ActionURN.CLOSE -> {
-                if (jsonType(msg.payload) == Action.CLOSE) {
+            Action.CLOSE.urn -> {
+                if (jsonType(msg.payload) == Action.CLOSE.actionName) {
                     Log.i("ChromecastController", "Received CLOSE command from device")
                     stopPlaying()
                 }
@@ -421,7 +421,7 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
         if (transportId == tid) return
         Log.i("ChromecastController", "Connected to application with transportId: $tid")
         transportId = tid
-        send(transportId!!, ActionURN.CONNECT, connectJson())
+        send(transportId!!, Action.CONNECT.urn, connectJson())
         withContext(Dispatchers.Main) { repo.setStreamingFlag(null) }
         val streamingFlag = repo.streamingFlag.value
         val deviceId = repo.selectedDeviceId.value
@@ -524,11 +524,11 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
     }
     private suspend fun handleHeartbeat(payload: String) {
         when (jsonType(payload)) {
-            Action.PING -> {
-                val pong = JSONObject().apply { put("type", Action.PONG) }.toString()
-                send(RECEIVER_ID, ActionURN.PONG, pong)
+            Action.PING.actionName -> {
+                val pong = JSONObject().apply { put("type", Action.PONG.actionName) }.toString()
+                send(RECEIVER_ID, Action.PONG.urn, pong)
             }
-            Action.PONG -> {
+            Action.PONG.actionName -> {
                 lastPongMs.set(System.currentTimeMillis())
             }
         }
@@ -544,8 +544,8 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
                 break
             }
             try {
-                val ping = JSONObject().apply { put("type", Action.PING) }.toString()
-                send(RECEIVER_ID, ActionURN.PING, ping)
+                val ping = JSONObject().apply { put("type", Action.PING.actionName) }.toString()
+                send(RECEIVER_ID, Action.PING.urn, ping)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -578,20 +578,20 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
             })
         }
         val payload = JSONObject().apply {
-            put("type",      Action.LOAD)
+            put("type",      Action.LOAD.actionName)
             put("requestId", nextReqId())
             put("media",     media)
             put("autoplay",  true)
         }
         isSplashActive = true
-        send(tid, ActionURN.LOAD, payload.toString())
+        send(tid, Action.LOAD.urn, payload.toString())
     }
     private suspend fun reLaunch() : Boolean {
         if (!isConnected) {
             return performHandshake()
         }
         Log.d("upnpkino", "reLaunch: sending LAUNCH to bring back Default Media Receiver")
-        return send(RECEIVER_ID, ActionURN.LAUNCH, launchJson())
+        return send(RECEIVER_ID, Action.LAUNCH.urn, launchJson())
     }
     private suspend fun requestPlayback(fileId: String) {
         val deviceId = repo.selectedDeviceId.value
@@ -622,18 +622,18 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
             })
         }
         val payload = JSONObject().apply {
-            put("type",        Action.LOAD)
+            put("type",        Action.LOAD.actionName)
             put("requestId",   nextReqId())
             put("media",       media)
             put("autoplay",    true)
             put("currentTime", 0L)
         }
         Log.d("upnpkino", "Sending LOAD payload: $payload")
-        send(tid, ActionURN.LOAD, payload.toString())
+        send(tid, Action.LOAD.urn, payload.toString())
     }
-    private suspend fun sendMediaCommand(command: String, args: Map<String, String>) : Boolean {
+    private suspend fun sendMediaCommand(command: Action, args: Map<String, String>) : Boolean {
         val tid  = transportId ?: run {
-            Log.w("ChromecastController", "sendMediaCommand $command: transportId is null")
+            Log.w("ChromecastController", "sendMediaCommand ${command.actionName}: transportId is null")
             return false
         }
         val payload = when (command) {
@@ -662,7 +662,7 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
                     })
                 }
                 JSONObject().apply {
-                    put("type", command)
+                    put("type", command.actionName)
                     put("requestId", nextReqId())
                     put("media", media)
                     put("autoplay", true)
@@ -678,7 +678,7 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
                 }
                 Log.i("ChromecastController", "Command SEEK: target=$target")
                 JSONObject().apply {
-                    put("type", command)
+                    put("type", command.actionName)
                     put("requestId", nextReqId())
                     put("mediaSessionId", msId)
                     put("currentTime", durationToSeconds(target!!).toDouble())
@@ -687,30 +687,30 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
             }
             else -> {
                 val msId = mediaSessionId ?: run {
-                    Log.w("ChromecastController", "sendMediaCommand $command: mediaSessionId is null")
+                    Log.w("ChromecastController", "sendMediaCommand ${command.actionName}: mediaSessionId is null")
                     return false
                 }
-                Log.i("ChromecastController", "Command $command")
+                Log.i("ChromecastController", "Command ${command.actionName}")
                 JSONObject().apply {
-                    put("type", command)
+                    put("type", command.actionName)
                     put("requestId", nextReqId())
                     put("mediaSessionId", msId)
                 }.toString()
             }
         }
-        Log.v("ChromecastController", "Sending command: $command payload: $payload")
-        return send(tid, getURN(command), payload)
+        Log.v("ChromecastController", "Sending command: ${command.actionName} payload: $payload")
+        return send(tid, command.urn, payload)
     }
     private suspend fun setVolume(level: Double) {
         val payload = JSONObject().apply {
-            put("type", Action.SET_VOLUME)
+            put("type", Action.SET_VOLUME.actionName)
             put("requestId", nextReqId())
             put("volume", JSONObject().apply {
                 put("level", level)
                 put("muted", false)
             })
         }
-        send(RECEIVER_ID, ActionURN.SET_VOLUME, payload.toString())
+        send(RECEIVER_ID, Action.SET_VOLUME.urn, payload.toString())
     }
     private suspend fun startPolling() {
         pollingMutex.withLock {
@@ -720,10 +720,10 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
                 while (isActive && isConnected) {
                     delay(PROGRESS_POLL_MS.milliseconds)
                     val payload = JSONObject().apply {
-                        put("type", Action.GET_STATUS)
+                        put("type", Action.GET_STATUS.actionName)
                         put("requestId", nextReqId()) }.toString()
                     runCatching {
-                        send(tid, ActionURN.GET_STATUS, payload)
+                        send(tid, Action.GET_STATUS.urn, payload)
                     }
                 }
             }
@@ -934,15 +934,15 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
         runBlocking(Dispatchers.IO) {
             runCatching {
                 if (tid != null && msId != null && isConnected) {
-                    send(tid, ActionURN.STOP, JSONObject().apply {
-                        put("type",           Action.STOP)
+                    send(tid, Action.STOP.urn, JSONObject().apply {
+                        put("type",           Action.STOP.actionName)
                         put("requestId",      nextReqId())
                         put("mediaSessionId", msId)
                     }.toString())
                 }
                 if (isConnected) {
-                    send(RECEIVER_ID, ActionURN.STOP_APP, JSONObject().apply {
-                        put("type",      Action.STOP)
+                    send(RECEIVER_ID, RECEIVER, JSONObject().apply {
+                        put("type",      Action.STOP.actionName)
                         put("requestId", nextReqId())
                     }.toString())
                 }

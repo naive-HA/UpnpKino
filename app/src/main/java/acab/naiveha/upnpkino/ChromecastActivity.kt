@@ -400,6 +400,7 @@ class ChromecastActivity : AppCompatActivity() {
                             binding.textDuration.text = getString(R.string.default_time)
                             binding.textPosition.text = getString(R.string.default_time)
                         }
+                        else -> {}
                     }
                 }
             }
@@ -454,15 +455,17 @@ class ChromecastActivity : AppCompatActivity() {
                         Action.STOP,
                         Action.PAUSE,
                         Action.ERROR -> return@collect
-                    }
-                    val totalSeconds = if (seekBarDuration != "00:00:00") Constants.durationToSeconds(seekBarDuration) else 0L
-                    binding.textDuration.text = seekBarDuration
-                    if (totalSeconds > 0) {
-                        binding.seekBar.isEnabled = true
-                        binding.seekBar.max = totalSeconds.toInt()
-                    } else {
-                        binding.seekBar.isEnabled = false
-                        binding.seekBar.progress = 0
+                        else -> {
+                            val totalSeconds = if (seekBarDuration != "00:00:00") Constants.durationToSeconds(seekBarDuration) else 0L
+                            binding.textDuration.text = seekBarDuration
+                            if (totalSeconds > 0) {
+                                binding.seekBar.isEnabled = true
+                                binding.seekBar.max = totalSeconds.toInt()
+                            } else {
+                                binding.seekBar.isEnabled = false
+                                binding.seekBar.progress = 0
+                            }
+                        }
                     }
                 }
             }
@@ -474,19 +477,21 @@ class ChromecastActivity : AppCompatActivity() {
                         Action.STOP,
                         Action.PAUSE,
                         Action.ERROR -> return@collect
-                    }
-                    val totalSeconds = if (repo.seekBarDuration.value != "00:00:00") Constants.durationToSeconds(repo.seekBarDuration.value) else 0L
-                    val currentSeconds = if (seekBarPosition != "00:00:00") Constants.durationToSeconds(seekBarPosition) else 0L
-                    if (totalSeconds > 0) {
-                        if (!repo.userIsSeeking.value && !isWaitingForSeek) {
-                            binding.textPosition.text = seekBarPosition
-                            binding.seekBar.progress = currentSeconds.toInt()
-                        }
-                    } else {
-                        binding.seekBar.isEnabled = false
-                        binding.seekBar.progress = 0
-                        if (!repo.userIsSeeking.value && !isWaitingForSeek) {
-                            binding.textPosition.text = seekBarPosition
+                        else -> {
+                            val totalSeconds = if (repo.seekBarDuration.value != "00:00:00") Constants.durationToSeconds(repo.seekBarDuration.value) else 0L
+                            val currentSeconds = if (seekBarPosition != "00:00:00") Constants.durationToSeconds(seekBarPosition) else 0L
+                            if (totalSeconds > 0) {
+                                if (!repo.userIsSeeking.value && !isWaitingForSeek) {
+                                    binding.textPosition.text = seekBarPosition
+                                    binding.seekBar.progress = currentSeconds.toInt()
+                                }
+                            } else {
+                                binding.seekBar.isEnabled = false
+                                binding.seekBar.progress = 0
+                                if (!repo.userIsSeeking.value && !isWaitingForSeek) {
+                                    binding.textPosition.text = seekBarPosition
+                                }
+                            }
                         }
                     }
                 }
