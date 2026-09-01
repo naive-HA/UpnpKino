@@ -63,14 +63,14 @@ class MainActivity : AppCompatActivity() {
     }
     private val selectLocalMovieFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         uri?.let {
-            val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             contentResolver.takePersistableUriPermission(it, takeFlags)
             preferences.saveLocalMovieFolderUri(it)
         }
     }
     private val selectLocalMusicFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         uri?.let {
-            val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             contentResolver.takePersistableUriPermission(it, takeFlags)
             preferences.saveLocalMusicFolderUri(it)
         }

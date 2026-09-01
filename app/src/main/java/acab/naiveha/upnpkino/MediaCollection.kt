@@ -283,7 +283,11 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                         val dlnaProfileVideo = buildDlnaVideoTokens(videoCodec, videoProfileIdc, width, height, videoBitrate)
                         val dlnaProfileAudio = buildDlnaAudioTokens(audioCodec, channelCount)
 
-                        val mimeType = Constants.mimeType[extension] ?: "application/octet-stream"
+                        var mimeType = Constants.mimeType[extension] ?: "application/octet-stream"
+                        if (mimeType == "application/octet-stream") {
+                            mimeType = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: "application/octet-stream"
+                        }
+
                         val item = MediaNode.Item(
                             id = childId,
                             name = (file.name as String),
@@ -553,6 +557,7 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                 "video" -> if (videoCodec == null) {
                     videoCodec = when (codecName) {
                         "h264" -> MediaFormat.MIMETYPE_VIDEO_AVC
+                        "hevc" -> MediaFormat.MIMETYPE_VIDEO_HEVC
                         else -> null
                     }
                     width = stream.optInt("width", 0)
