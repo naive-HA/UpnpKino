@@ -62,7 +62,7 @@ class UpnpTileService : TileService() {
             Constants.vibrate(this)
         } else {
             try {
-                val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                val connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
                 @Suppress("DEPRECATION")
                 val wifiNetwork = connectivityManager.allNetworks.find { network ->
                     val capabilities = connectivityManager.getNetworkCapabilities(network)
