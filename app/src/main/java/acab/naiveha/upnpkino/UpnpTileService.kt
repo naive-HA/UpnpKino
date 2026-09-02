@@ -1,6 +1,5 @@
 package acab.naiveha.upnpkino
 
-import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
