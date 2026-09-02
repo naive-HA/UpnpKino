@@ -528,6 +528,9 @@ cd "$FFMPEG_SRC"
     --enable-muxer=mpegts \
     --enable-muxer=null \
     \
+    --enable-muxer=rawvideo \
+    --enable-muxer=yuv4mpegpipe \
+    \
     `# ---- Parsers ----` \
     --enable-parser=h264 \
     --enable-parser=hevc \
