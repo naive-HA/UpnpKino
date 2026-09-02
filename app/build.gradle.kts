@@ -15,7 +15,7 @@ android {
         buildConfigField("String", "APPLICATION_NAME", "\"UPnP Kino\"")
         buildConfigField("String", "APPLICATION_MANUFACTURER", "\"naive-HA\"")
         applicationId = "acab.naiveha.upnpkino"
-        minSdk = 26
+        minSdk = 29
         //noinspection EditedTargetSdkVersion
         targetSdk = 37
         versionCode = 11
