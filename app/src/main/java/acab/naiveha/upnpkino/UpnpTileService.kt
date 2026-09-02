@@ -28,19 +28,13 @@ class UpnpTileService : TileService() {
             tile.label = "UPnP Kino"
             if (isStarting && !isRunning) {
                 tile.state = Tile.STATE_INACTIVE
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Starting..."
-                }
+                tile.subtitle = "Starting..."
             } else if (isRunning) {
                 tile.state = Tile.STATE_ACTIVE
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Running"
-                }
+                tile.subtitle = "Running"
             } else {
                 tile.state = Tile.STATE_INACTIVE
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                    tile.subtitle = "Stopped"
-                }
+                tile.subtitle = "Stopped"
             }
             tile.updateTile()
         }.launchIn(serviceScope)
