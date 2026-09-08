@@ -54,7 +54,10 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
             val durationMs: Long,
             val resolution: String,
             val videoCodec: String? = null,
+            val videoBitrate: Int? = null,
             val audioCodec: String? = null,
+            val channelCount: Int? = null,
+            val isFastStart: Boolean = true,
             val audioTracks: List<AudioTrack> = emptyList(),
             val subtitleTracks: List<SubtitleTrack> = emptyList(),
             val dlnaProfileVideo: List<String> = emptyList(),
@@ -211,11 +214,17 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                         var channelCount: Int? = null
                         var audioTracks = listOf<AudioTrack>()
                         var subtitleTracks = listOf<SubtitleTrack>()
+                        var isFastStart = true
 
                         var ffprobeSucceeded = false
                         try {
                             val ffprobeResult = context.contentResolver.openFileDescriptor(file.uri, "r")?.use { pfd ->
-                                probeWithFfprobe(pfd)
+                                val result = probeWithFfprobe(pfd)
+                                // Detect trailing moov for MP4/MOV
+                                if (extension == "mp4" || extension == "mov" || extension == "m4a") {
+                                    isFastStart = checkMp4FastStart(pfd)
+                                }
+                                result
                             }
                             if (ffprobeResult != null) {
                                 ffprobeSucceeded = true
@@ -237,7 +246,7 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                             Log.e("MediaCollection", "Error probing with ffprobe: ${file.name} (URI: ${file.uri})")
                         }
 
-                        if (!ffprobeSucceeded) {
+                        if (!ffprobeSucceeded || album.isEmpty() || artist.isEmpty() || durationMs == 0L || width == 0 || height == 0) {
                             try {
                                 context.contentResolver.openFileDescriptor(file.uri, "r")?.use { pfd ->
                                     if (actualSize > 0) {
@@ -246,33 +255,42 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                                         retriever.setDataSource(context, file.uri)
                                     }
                                 }
-                                album = (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM) ?: "")
-                                artist = (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST) ?: "")
-                                durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                                duration = formatDuration(durationMs)
+                                if (album.isEmpty()) album = (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM) ?: "")
+                                if (artist.isEmpty()) artist = (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST) ?: "")
+                                if (durationMs == 0L) {
+                                    durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                                    duration = formatDuration(durationMs)
+                                }
+                                if (width == 0) width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                                if (height == 0) height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
                             } catch (e: Exception) {
-                                Log.e("MediaCollection", "Error reading tags: ${file.name} (URI: ${file.uri})")
-                                continue
+                                Log.e("MediaCollection", "Error reading tags with retriever: ${file.name} (URI: ${file.uri})")
                             }
+                        }
 
+                        if (!ffprobeSucceeded || videoCodec == null || videoProfileIdc == null || width == 0 || height == 0 || videoBitrate == null
+                            || audioCodec == null || channelCount== null || audioTracks.isEmpty() || subtitleTracks.isEmpty() || durationMs == 0L) {
                             try {
                                 val fallbackResult = context.contentResolver.openFileDescriptor(file.uri, "r")?.use { pfd ->
                                     extractWithMediaExtractor(pfd, actualSize, file.uri)
                                 }
                                 if (fallbackResult != null) {
-                                    videoCodec = fallbackResult.videoCodec
-                                    videoProfileIdc = fallbackResult.videoProfileIdc
-                                    width = fallbackResult.width
-                                    height = fallbackResult.height
-                                    videoBitrate = fallbackResult.videoBitrate
-                                    audioCodec = fallbackResult.audioCodec
-                                    channelCount = fallbackResult.channelCount
-                                    audioTracks = fallbackResult.audioTracks
-                                    subtitleTracks = fallbackResult.subtitleTracks
+                                    if (videoCodec == null) videoCodec = fallbackResult.videoCodec
+                                    if (videoProfileIdc == null) videoProfileIdc = fallbackResult.videoProfileIdc
+                                    if (width == 0) width = fallbackResult.width
+                                    if (height == 0) height = fallbackResult.height
+                                    if (videoBitrate == null) videoBitrate = fallbackResult.videoBitrate
+                                    if (audioCodec == null) audioCodec = fallbackResult.audioCodec
+                                    if (channelCount == null) channelCount = fallbackResult.channelCount
+                                    if (audioTracks.isEmpty()) audioTracks = fallbackResult.audioTracks
+                                    if (subtitleTracks.isEmpty()) subtitleTracks = fallbackResult.subtitleTracks
+                                    if (durationMs == 0L) {
+                                        durationMs = fallbackResult.durationMs
+                                        duration = formatDuration(durationMs)
+                                    }
                                 }
                             } catch (e: Exception) {
-                                Log.e("MediaCollection", "Error extracting profile params: ${file.name} (URI: ${file.uri})")
-                                continue
+                                Log.e("MediaCollection", "Error extracting profile params with MediaExtractor: ${file.name} (URI: ${file.uri})")
                             }
                         }
 
@@ -302,7 +320,10 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                             durationMs = durationMs,
                             resolution = resolution,
                             videoCodec = videoCodec,
+                            videoBitrate = videoBitrate,
                             audioCodec = audioCodec,
+                            channelCount = channelCount,
+                            isFastStart = isFastStart,
                             audioTracks = audioTracks,
                             subtitleTracks = subtitleTracks,
                             dlnaProfileVideo = dlnaProfileVideo,
@@ -420,6 +441,7 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
         var channelCount: Int? = null
         val audioTracks = mutableListOf<AudioTrack>()
         val subtitleTracks = mutableListOf<SubtitleTrack>()
+        var durationMs = 0L
 
         val extractor = MediaExtractor()
         try {
@@ -431,6 +453,12 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
             for (trackIndex in 0 until extractor.trackCount) {
                 val format = extractor.getTrackFormat(trackIndex)
                 val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+
+                if (format.containsKey(MediaFormat.KEY_DURATION)) {
+                    val trackDurationMs = format.getLong(MediaFormat.KEY_DURATION) / 1000
+                    if (trackDurationMs > durationMs) durationMs = trackDurationMs
+                }
+
                 when {
                     mime.startsWith("video/") && videoCodec == null -> {
                         videoCodec = mime
@@ -464,7 +492,7 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
             extractor.release()
         }
 
-        return ExtractionResult(videoCodec, videoProfileIdc, width, height, videoBitrate, audioCodec, channelCount, audioTracks, subtitleTracks)
+        return ExtractionResult(videoCodec, videoProfileIdc, width, height, videoBitrate, audioCodec, channelCount, audioTracks, subtitleTracks, durationMs = durationMs)
     }
 
     private fun probeWithFfprobe(pfd: ParcelFileDescriptor): ExtractionResult? {
@@ -558,7 +586,11 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                     videoCodec = when (codecName) {
                         "h264" -> MediaFormat.MIMETYPE_VIDEO_AVC
                         "hevc" -> MediaFormat.MIMETYPE_VIDEO_HEVC
-                        else -> null
+                        "mpeg4" -> MediaFormat.MIMETYPE_VIDEO_MPEG4
+                        "msmpeg4v3" -> "video/x-msmpeg4v3"
+                        "vp9" -> MediaFormat.MIMETYPE_VIDEO_VP9
+                        "wmv2" -> "video/x-ms-wmv"
+                        else -> "video/vnd.ffmpeg.$codecName"
                     }
                     width = stream.optInt("width", 0)
                     height = stream.optInt("height", 0)
@@ -575,13 +607,20 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                     val mappedMime = when (codecName) {
                         "aac" -> MediaFormat.MIMETYPE_AUDIO_AAC
                         "mp3" -> MediaFormat.MIMETYPE_AUDIO_MPEG
-                        else -> null
+                        "ac3" -> MediaFormat.MIMETYPE_AUDIO_AC3
+                        "eac3" -> MediaFormat.MIMETYPE_AUDIO_EAC3
+                        "dca" -> "audio/vnd.dts"
+                        "dts" -> "audio/vnd.dts"
+                        "flac" -> MediaFormat.MIMETYPE_AUDIO_FLAC
+                        "vorbis" -> MediaFormat.MIMETYPE_AUDIO_VORBIS
+                        "opus" -> MediaFormat.MIMETYPE_AUDIO_OPUS
+                        else -> "audio/vnd.ffmpeg.$codecName"
                     }
                     if (audioCodec == null) {
                         audioCodec = mappedMime
                         channelCount = trackChannelCount
                     }
-                    audioTracks.add(AudioTrack(index, mappedMime ?: codecName, trackChannelCount, language))
+                    audioTracks.add(AudioTrack(index, mappedMime, trackChannelCount, language))
                 }
                 "subtitle" -> {
                     val subtitleCodecMime = when (codecName) {
@@ -612,5 +651,53 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
         val minutes = (totalSeconds % 3600) / 60
         val seconds = totalSeconds % 60
         return String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, minutes, seconds)
+    }
+
+    /**
+     * Inspects an MP4/MOV file's atoms to see if the 'moov' atom appears before 'mdat'.
+     * If 'mdat' appears first, the file is unoptimized for streaming/piping.
+     */
+    private fun checkMp4FastStart(pfd: ParcelFileDescriptor): Boolean {
+        try {
+            val fis = FileInputStream(pfd.fileDescriptor)
+            val buffer = ByteArray(8)
+            var offset = 0L
+            var moovPos = -1L
+            var mdatPos = -1L
+            
+            // We only care about the first ~1MB for this optimization check
+            while (offset < 1024 * 1024) {
+                val read = fis.read(buffer)
+                if (read < 8) break
+                
+                val size = ((buffer[0].toInt() and 0xFF).toLong() shl 24) or
+                           ((buffer[1].toInt() and 0xFF).toLong() shl 16) or
+                           ((buffer[2].toInt() and 0xFF).toLong() shl 8) or
+                           (buffer[3].toInt() and 0xFF).toLong()
+                
+                val type = String(buffer, 4, 4)
+                
+                if (type == "moov") {
+                    moovPos = offset
+                    break // Found it!
+                }
+                if (type == "mdat") {
+                    mdatPos = offset
+                }
+                
+                if (size < 8) break // Invalid atom
+                
+                // Skip the rest of the atom
+                val skip = size - 8
+                fis.skip(skip)
+                offset += size
+            }
+            
+            // If we found mdat but not moov yet, it's at the end.
+            if (mdatPos != -1L && (moovPos == -1L || moovPos > mdatPos)) return false
+            return true
+        } catch (e: Exception) {
+            return true // Default to safe if check fails
+        }
     }
 }
