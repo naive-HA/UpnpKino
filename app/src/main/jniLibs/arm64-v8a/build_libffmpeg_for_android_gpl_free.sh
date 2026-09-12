@@ -19,19 +19,15 @@ set -euo pipefail
 # Dependency chain:
 #   zlib 1.3.2      → compressed-track MKV support
 #   FreeType 2.14.3 → font rasterisation (required by libass)
-#   HarfBuzz 14.2.0 → text shaping (required by libass)
+#   HarfBuzz 14.4.0 → text shaping (required by libass)
 #   FriBidi 1.0.16  → Unicode BiDi algorithm (required by libass)
 #   libass 0.17.5   → subtitle burn-in (0.17.4 -> 0.17.5: fixes GHSA-pjjp-65r7-ppgm
 #                     and GHSA-5gf7-wjfm-vmvm, both OOB reads in code paths that
 #                     parse untrusted subtitle/Matroska data -- relevant here since
 #                     libass parses whatever track a user's .mkv happens to contain)
-#   FFmpeg n8.1.2   → the binary (n8.1 -> n8.1.2: same 8.1 branch/ABI, ~4 months
-#                     and 100+ stability fixes on top of the initial 8.1.0 tag --
-#                     deliberately NOT jumping to 9.0 "Lei" here: released only
-#                     weeks ago, ABI-breaking, ~2200 commits -- too large a jump
-#                     to make mid-investigation without confounding whatever
-#                     Gate 1/2/3 conclude about Surface-mode with "and we also
-#                     changed ffmpeg major versions." Revisit once that's settled.
+#   FFmpeg n9.0.1   → the binary (n9.0.1 "Lei" branch: adds native VVC
+#                     decoding, significant AV1 enhancements, and extensive
+#                     AMF hardware memory mapping improvements)
 #
 # NDK version
 #   Detected automatically from ~/Android/Sdk/ndk/ (latest installed).
@@ -266,8 +262,8 @@ HARFBUZZ_SRC="$BUILD_DIR/harfbuzz"
 
 if [ ! -d "$HARFBUZZ_SRC" ]; then
     echo ""
-    echo ">>> Cloning HarfBuzz (14.2.0)..."
-    git -c advice.detachedHead=false clone --quiet --depth 1 --branch 14.2.0 \
+    echo ">>> Cloning HarfBuzz (14.4.0)..."
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch 14.4.0 \
         https://github.com/harfbuzz/harfbuzz.git "$HARFBUZZ_SRC"
 fi
 
@@ -386,8 +382,8 @@ FFMPEG_SRC="$BUILD_DIR/ffmpeg"
 
 if [ ! -d "$FFMPEG_SRC" ]; then
     echo ""
-    echo ">>> Cloning FFmpeg (n8.1.2)..."
-    git -c advice.detachedHead=false clone --quiet --depth 1 --branch n8.1.2 \
+    echo ">>> Cloning FFmpeg (n9.0.1)..."
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch n9.0.1 \
         https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_SRC"
 fi
 
@@ -441,6 +437,7 @@ cd "$FFMPEG_SRC"
     --enable-demuxer=srt \
     --enable-demuxer=ass \
     --enable-demuxer=webvtt \
+    --enable-demuxer=concat \
     --enable-indev=lavfi \
     \
     `# ---- Video decoders ----` \
