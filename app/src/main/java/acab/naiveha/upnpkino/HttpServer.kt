@@ -14,6 +14,7 @@ import java.io.FileInputStream
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import org.eclipse.jetty.http.HttpHeader
 import org.eclipse.jetty.http.HttpStatus
 import org.eclipse.jetty.io.Content
@@ -190,50 +191,125 @@ class HttpServer(private val context: Context, val upnpService: UpnpService) {
                                     return true
                                 }
 
+                                val rangeHeader = request.headers.get(HttpHeader.RANGE.asString())
+                                val timeSeekHeader = request.headers.get("TimeSeekRange.dlna.org")
+                                val startChunk = if (timeSeekHeader != null) {
+                                    val nptMatch = Regex("npt=([\\d.:]+)-").find(timeSeekHeader)
+                                    val nptStr = nptMatch?.groupValues?.get(1)
+                                    if (nptStr != null) {
+                                        val timeMs = if (nptStr.contains(":")) {
+                                            Constants.durationToSeconds(nptStr) * 1000L
+                                        } else {
+                                            (nptStr.toDoubleOrNull() ?: 0.0).toLong() * 1000L
+                                        }
+                                        upnpService.mediaCollection.resolveSeekByTime(node, timeMs)
+                                    } else {
+                                        Pair(0L, 0L)
+                                    }
+                                } else if (rangeHeader != null) {
+                                    val match = Regex("bytes=(\\d+)-").find(rangeHeader)
+                                    val startByte = match?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                                    upnpService.mediaCollection.resolveSeekByByte(node, startByte)
+                                } else {
+                                    Pair(0L, 0L)
+                                }
+
+                                if (request.httpURI.query?.contains("transcoded") == true) {
+                                    val query = request.httpURI.query ?: ""
+                                    
+                                    val targetVideoCodec = if (query.contains("targetVideoCodec=hevc", ignoreCase = true)) {
+                                        Constants.Transcoder.VideoCodec.HEVC
+                                    } else {
+                                        Constants.Transcoder.VideoCodec.H264
+                                    }
+
+                                    val targetAudioCodec = if (query.contains("targetAudioCodec=ac3", ignoreCase = true)) {
+                                        Constants.Transcoder.AudioCodec.AC3
+                                    } else {
+                                        Constants.Transcoder.AudioCodec.AAC
+                                    }
+
+                                    val audioTrack = Regex("[?&]audioTrack=(\\d+)").find(query)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                                    val subtitleTrack = Regex("[?&]subtitleTrack=(\\d+)").find(query)?.groupValues?.get(1)?.toIntOrNull()
+
+                                    val targetResolutionStr = Regex("[?&]targetResolution=([^&]+)").find(query)?.groupValues?.get(1)
+                                    val targetResolution = Constants.Transcoder.Resolution.entries.find { it.name.equals(targetResolutionStr, ignoreCase = true) }
+
+                                    upnpService.transcoderController.scope.launch {
+                                        try {
+                                            upnpService.transcoderController.transcodeMediaFile(
+                                                node,
+                                                startChunk.first,
+                                                targetVideoCodec,
+                                                targetResolution,
+                                                subtitleTrack,
+                                                audioTrack,
+                                                targetAudioCodec
+                                            ) { status, contentType, writer ->
+                                                response.status = when (status) {
+                                                    true -> HttpStatus.PARTIAL_CONTENT_206
+                                                    false -> HttpStatus.INTERNAL_SERVER_ERROR_500
+                                                    else -> HttpStatus.OK_200
+                                                }
+                                                response.headers.put(HttpHeader.CONTENT_TYPE, contentType)
+                                                try {
+                                                    val out = Content.Sink.asOutputStream(response)
+                                                    writer(out)
+                                                } finally {
+                                                    callback.succeeded()
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.e("HttpServer", "Async transcoding error", e)
+                                            if (!response.isCommitted) {
+                                                response.status = HttpStatus.INTERNAL_SERVER_ERROR_500
+                                                callback.succeeded()
+                                            } else {
+                                                callback.failed(e)
+                                            }
+                                        }
+                                    }
+                                    return true
+                                }
+
                                 try {
                                     context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
                                         val fileSize = Constants.getFileSize(pfd)
                                         Log.v("HttpServer", "Serving media item: name=${node.name} size=$fileSize mime=${node.mimeType}")
-                                        val rangeHeader = request.headers.get(HttpHeader.RANGE.asString())
                                         val mimeType = node.mimeType
+                                        val startByte = startChunk.second
 
-                                        if (rangeHeader != null) {
-                                            Log.v("HttpServer", "Range request: $rangeHeader")
-                                            val rangeRegex = Regex("^bytes=(\\d+)-(\\d*)$")
-                                            val match = rangeRegex.find(rangeHeader)
-                                            if (match == null) {
-                                                Log.w("HttpServer", "Invalid range header format: $rangeHeader")
+                                        if ((startByte > 0) || (rangeHeader != null) || (timeSeekHeader != null)) {
+                                            Log.v("HttpServer", "Partial request: startByte=$startByte")
+                                            /*
+                                            val endStr = match.groupValues[2]
+                                            var end = if (endStr.isNotEmpty()) endStr.toLongOrNull() else fileSize - 1
+                                            */
+                                            val endByte = fileSize - 1
+
+                                            if (startByte >= fileSize /* || end == null || start > end */) {
+                                                Log.w("HttpServer", "Range not satisfiable: start=$startByte end=$endByte size=$fileSize")
                                                 response.status = HttpStatus.RANGE_NOT_SATISFIABLE_416
                                                 response.headers.put(HttpHeader.CONTENT_RANGE.asString(), "bytes */$fileSize")
                                             } else {
-                                                val start = match.groupValues[1].toLongOrNull()
-                                                val endStr = match.groupValues[2]
-                                                var end = if (endStr.isNotEmpty()) endStr.toLongOrNull() else fileSize - 1
+                                                /* if (end >= fileSize) end = fileSize - 1 */
+                                                Log.v("HttpServer", "Serving partial content: $startByte-$endByte/$fileSize")
+                                                response.status = HttpStatus.PARTIAL_CONTENT_206
+                                                response.headers.put(HttpHeader.CONTENT_TYPE, mimeType)
+                                                response.headers.put(HttpHeader.CONTENT_RANGE.asString(), "bytes $startByte-$endByte/$fileSize")
+                                                response.headers.put(HttpHeader.CONTENT_LENGTH.asString(), (endByte - startByte + 1).toString())
 
-                                                if (start == null || end == null || start >= fileSize || start > end) {
-                                                    Log.w("HttpServer", "Range not satisfiable: start=$start end=$end size=$fileSize")
-                                                    response.status = HttpStatus.RANGE_NOT_SATISFIABLE_416
-                                                    response.headers.put(HttpHeader.CONTENT_RANGE.asString(), "bytes */$fileSize")
-                                                } else {
-                                                    if (end >= fileSize) end = fileSize - 1
-                                                    Log.v("HttpServer", "Serving partial content: $start-$end/$fileSize")
-                                                    response.status = HttpStatus.PARTIAL_CONTENT_206
-                                                    response.headers.put(HttpHeader.CONTENT_TYPE, mimeType)
-                                                    response.headers.put(HttpHeader.CONTENT_RANGE.asString(), "bytes $start-$end/$fileSize")
-                                                    response.headers.put(HttpHeader.CONTENT_LENGTH.asString(), (end - start + 1).toString())
-
-                                                    FileInputStream(pfd.fileDescriptor).use { inStream ->
-                                                        inStream.skip(start)
-                                                        val buffer = ByteArray(8192)
-                                                        var bytesLeft = end - start + 1
-                                                        val outStream = Content.Sink.asOutputStream(response)
-                                                        while (bytesLeft > 0) {
-                                                            val toRead = min(bytesLeft, buffer.size.toLong()).toInt()
-                                                            val read = inStream.read(buffer, 0, toRead)
-                                                            if (read == -1) break
-                                                            outStream.write(buffer, 0, read)
-                                                            bytesLeft -= read
-                                                        }
+                                                FileInputStream(pfd.fileDescriptor).use { inStream ->
+                                                    inStream.skip(startByte)
+                                                    val buffer = ByteArray(8192)
+                                                    var bytesLeft = endByte - startByte + 1
+                                                    val outStream = Content.Sink.asOutputStream(response)
+                                                    while (bytesLeft > 0L) {
+                                                        val toRead = min(bytesLeft, buffer.size.toLong()).toInt()
+                                                        val read = inStream.read(buffer, 0, toRead)
+                                                        if (read == -1) break
+                                                        outStream.write(buffer, 0, read)
+                                                        bytesLeft -= read
                                                     }
                                                 }
                                             }

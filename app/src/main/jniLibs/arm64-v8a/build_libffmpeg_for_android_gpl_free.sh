@@ -553,6 +553,7 @@ cd "$FFMPEG_SRC"
     --enable-filter=aresample \
     --enable-filter=subtitles \
     --enable-filter=ass \
+    --enable-filter=pad \
     --enable-filter=testsrc \
     --enable-filter=sine \
     --enable-filter=format \
@@ -763,6 +764,7 @@ Subtitle passthrough / remux
 ------------------------------------------------------------
 
   scale       resize video  e.g. scale=1920:1080  scale=-2:720
+  pad         add black bars for aspect ratio preservation
   aresample   resample audio to a target sample rate
   subtitles   burn subtitle stream from container into video
                 -vf subtitles=input.mkv

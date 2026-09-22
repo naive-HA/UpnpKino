@@ -213,18 +213,46 @@ object Constants {
         }
     }
     object Transcoder {
-        // Video encoders are MediaCodec-backed (hardware); ffmpegEncoder is the -c:v name.
-        enum class VideoCodec(val ffmpegEncoder: String) {
-            H264("h264_mediacodec"),
-            HEVC("hevc_mediacodec")
+        // Video codecs; codecId is the canonical string identifier for the codec.
+        // hardwareEncoder is the name of the platform-specific hardware encoder if one exists.
+        enum class VideoCodec(val codecId: String, val hardwareEncoder: String? = null) {
+            UNKNOWN("unknown"),
+            H264("h264", "h264_mediacodec"),
+            HEVC("hevc", "hevc_mediacodec"),
+            VP9("vp9"),
+            VP8("vp8"),
+            AV1("av1"),
+            MPEG4("mpeg4"),
+            MPEG2("mpeg2video"),
+            WMV3("wmv3"),
+            VC1("vc1"),
+            MJPEG("mjpeg"),
+            PRORES("prores"),
+            DNXHD("dnxhd");
+
+            val encoderId: String get() = hardwareEncoder ?: "UNKNOWN"
         }
-        // Audio encoders are software; testChannels is the channel count each is actually used for
-        // here (AC3 exists specifically to carry 5.1) and what capability checks encode a test tone at.
-        enum class AudioCodec(val ffmpegEncoder: String, val testChannels: Int) {
-            AAC("aac", 2),
-            AC3("ac3", 6)
+
+        // Audio codecs; testChannels is used for capability probing.
+        enum class AudioCodec(val codecId: String, val testChannels: Int, val softwareEncoder: String? = null) {
+            UNKNOWN("unknown", 0),
+            AAC("aac", 2, "aac"),
+            AC3("ac3", 6, "ac3"),
+            EAC3("eac3", 6),
+            DCA("dca", 6),
+            MP3("mp3", 2),
+            OPUS("opus", 2),
+            VORBIS("vorbis", 2),
+            FLAC("flac", 2),
+            ALAC("alac", 2),
+            MLP("mlp", 8),
+            TRUEHD("truehd", 8),
+            PCM_S16LE("pcm_s16le", 2),
+            WMAV2("wmav2", 2);
+
+            val encoderId: String get() = softwareEncoder ?: "UNKNOWN"
         }
-        enum class Container(val ffmpegMuxer: String) {
+        enum class Container(val formatId: String) {
             MP4("mp4"),
             MPEG_TS("mpegts"),
             MKV("matroska")

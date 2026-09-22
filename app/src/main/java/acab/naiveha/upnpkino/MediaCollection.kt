@@ -53,9 +53,9 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
             val duration: String,
             val durationMs: Long,
             val resolution: String,
-            val videoCodec: String? = null,
+            val videoCodec: Constants.Transcoder.VideoCodec = Constants.Transcoder.VideoCodec.UNKNOWN,
             val videoBitrate: Int? = null,
-            val audioCodec: String? = null,
+            val audioCodec: Constants.Transcoder.AudioCodec = Constants.Transcoder.AudioCodec.UNKNOWN,
             val channelCount: Int? = null,
             val isFastStart: Boolean = true,
             val audioTracks: List<AudioTrack> = emptyList(),
@@ -73,7 +73,7 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
 
     data class AudioTrack(
         val index: Int,
-        val codec: String,
+        val codec: Constants.Transcoder.AudioCodec,
         val channelCount: Int?,
         val language: String?
     )
@@ -205,12 +205,12 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                             Log.e("MediaCollection", "Error resolving file size: ${file.name} (URI: ${file.uri})")
                         }
 
-                        var videoCodec: String? = null
+                        var videoCodec = Constants.Transcoder.VideoCodec.UNKNOWN
                         var videoProfileIdc: Int? = null
                         var width = 0
                         var height = 0
                         var videoBitrate: Int? = null
-                        var audioCodec: String? = null
+                        var audioCodec = Constants.Transcoder.AudioCodec.UNKNOWN
                         var channelCount: Int? = null
                         var audioTracks = listOf<AudioTrack>()
                         var subtitleTracks = listOf<SubtitleTrack>()
@@ -268,19 +268,19 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                             }
                         }
 
-                        if (!ffprobeSucceeded || videoCodec == null || videoProfileIdc == null || width == 0 || height == 0 || videoBitrate == null
-                            || audioCodec == null || channelCount== null || audioTracks.isEmpty() || subtitleTracks.isEmpty() || durationMs == 0L) {
+                        if (!ffprobeSucceeded || videoCodec == Constants.Transcoder.VideoCodec.UNKNOWN || videoProfileIdc == null || width == 0 || height == 0 || videoBitrate == null
+                            || audioCodec == Constants.Transcoder.AudioCodec.UNKNOWN || channelCount == null || audioTracks.isEmpty() || subtitleTracks.isEmpty() || durationMs == 0L) {
                             try {
                                 val fallbackResult = context.contentResolver.openFileDescriptor(file.uri, "r")?.use { pfd ->
                                     extractWithMediaExtractor(pfd, actualSize, file.uri)
                                 }
                                 if (fallbackResult != null) {
-                                    if (videoCodec == null) videoCodec = fallbackResult.videoCodec
+                                    if (videoCodec == Constants.Transcoder.VideoCodec.UNKNOWN) videoCodec = fallbackResult.videoCodec
                                     if (videoProfileIdc == null) videoProfileIdc = fallbackResult.videoProfileIdc
                                     if (width == 0) width = fallbackResult.width
                                     if (height == 0) height = fallbackResult.height
                                     if (videoBitrate == null) videoBitrate = fallbackResult.videoBitrate
-                                    if (audioCodec == null) audioCodec = fallbackResult.audioCodec
+                                    if (audioCodec == Constants.Transcoder.AudioCodec.UNKNOWN) audioCodec = fallbackResult.audioCodec
                                     if (channelCount == null) channelCount = fallbackResult.channelCount
                                     if (audioTracks.isEmpty()) audioTracks = fallbackResult.audioTracks
                                     if (subtitleTracks.isEmpty()) subtitleTracks = fallbackResult.subtitleTracks
@@ -294,7 +294,7 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                             }
                         }
 
-                        if (videoBitrate == null && videoCodec != null && audioCodec == null) {
+                        if (videoBitrate == null && videoCodec != Constants.Transcoder.VideoCodec.UNKNOWN && audioCodec == Constants.Transcoder.AudioCodec.UNKNOWN) {
                             videoBitrate = computeFallbackBitrate(actualSize, durationMs)
                         }
                         val resolution = "${width}x${height}"
@@ -385,13 +385,13 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
     }
 
     private fun buildDlnaVideoTokens(
-        videoCodec: String?,
+        videoCodec: Constants.Transcoder.VideoCodec,
         videoProfileIdc: Int?,
         width: Int,
         height: Int,
         videoBitrate: Int?
     ): List<String> {
-        if (videoCodec != MediaFormat.MIMETYPE_VIDEO_AVC) return emptyList()
+        if (videoCodec != Constants.Transcoder.VideoCodec.H264) return emptyList()
         val tokens = mutableListOf("AVC")
         when (videoProfileIdc) {
             66 -> tokens.add("BL")
@@ -407,22 +407,22 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
         return tokens
     }
 
-    private fun buildDlnaAudioTokens(audioCodec: String?, channelCount: Int?): List<String> {
+    private fun buildDlnaAudioTokens(audioCodec: Constants.Transcoder.AudioCodec, channelCount: Int?): List<String> {
         return when (audioCodec) {
-            MediaFormat.MIMETYPE_AUDIO_AAC ->
+            Constants.Transcoder.AudioCodec.AAC ->
                 if ((channelCount ?: 0) >= 6) listOf("AAC", "MULT5") else listOf("AAC")
-            MediaFormat.MIMETYPE_AUDIO_MPEG -> listOf("MP3")
+            Constants.Transcoder.AudioCodec.MP3 -> listOf("MP3")
             else -> emptyList()
         }
     }
 
     private data class ExtractionResult(
-        val videoCodec: String?,
+        val videoCodec: Constants.Transcoder.VideoCodec,
         val videoProfileIdc: Int?,
         val width: Int,
         val height: Int,
         val videoBitrate: Int?,
-        val audioCodec: String?,
+        val audioCodec: Constants.Transcoder.AudioCodec,
         val channelCount: Int?,
         val audioTracks: List<AudioTrack>,
         val subtitleTracks: List<SubtitleTrack>,
@@ -432,12 +432,12 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
     )
 
     private fun extractWithMediaExtractor(pfd: ParcelFileDescriptor, actualSize: Long, fileUri: Uri): ExtractionResult {
-        var videoCodec: String? = null
+        var videoCodec = Constants.Transcoder.VideoCodec.UNKNOWN
         var videoProfileIdc: Int? = null
         var width = 0
         var height = 0
         var videoBitrate: Int? = null
-        var audioCodec: String? = null
+        var audioCodec = Constants.Transcoder.AudioCodec.UNKNOWN
         var channelCount: Int? = null
         val audioTracks = mutableListOf<AudioTrack>()
         val subtitleTracks = mutableListOf<SubtitleTrack>()
@@ -460,8 +460,8 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                 }
 
                 when {
-                    mime.startsWith("video/") && videoCodec == null -> {
-                        videoCodec = mime
+                    mime.startsWith("video/") && videoCodec == Constants.Transcoder.VideoCodec.UNKNOWN -> {
+                        videoCodec = extractVideoCodec(mime)
                         width = if (format.containsKey(MediaFormat.KEY_WIDTH)) format.getInteger(MediaFormat.KEY_WIDTH) else 0
                         height = if (format.containsKey(MediaFormat.KEY_HEIGHT)) format.getInteger(MediaFormat.KEY_HEIGHT) else 0
                         videoBitrate = if (format.containsKey(MediaFormat.KEY_BIT_RATE)) {
@@ -474,13 +474,14 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                         }
                     }
                     mime.startsWith("audio/") -> {
+                        val normalized = extractAudioCodec(mime)
                         val trackChannelCount = if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) else null
                         val trackLanguage = if (format.containsKey(MediaFormat.KEY_LANGUAGE)) format.getString(MediaFormat.KEY_LANGUAGE) else null
-                        if (audioCodec == null) {
-                            audioCodec = mime
+                        if (audioCodec == Constants.Transcoder.AudioCodec.UNKNOWN) {
+                            audioCodec = normalized
                             channelCount = trackChannelCount
                         }
-                        audioTracks.add(AudioTrack(trackIndex, mime, trackChannelCount, trackLanguage))
+                        audioTracks.add(AudioTrack(trackIndex, normalized, trackChannelCount, trackLanguage))
                     }
                     mime.startsWith("text/") || mime == "application/x-subrip" -> {
                         val trackLanguage = if (format.containsKey(MediaFormat.KEY_LANGUAGE)) format.getString(MediaFormat.KEY_LANGUAGE) else null
@@ -565,12 +566,12 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
 
     private fun parseFfprobeJson(json: String): ExtractionResult {
         val root = JSONObject(json)
-        var videoCodec: String? = null
+        var videoCodec = Constants.Transcoder.VideoCodec.UNKNOWN
         var videoProfileIdc: Int? = null
         var width = 0
         var height = 0
         var videoBitrate: Int? = null
-        var audioCodec: String? = null
+        var audioCodec = Constants.Transcoder.AudioCodec.UNKNOWN
         var channelCount: Int? = null
         val audioTracks = mutableListOf<AudioTrack>()
         val subtitleTracks = mutableListOf<SubtitleTrack>()
@@ -582,16 +583,8 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
             val codecName = stream.optString("codec_name", "")
             val language = stream.optJSONObject("tags")?.optString("language")?.takeIf { it.isNotBlank() }
             when (stream.optString("codec_type", "")) {
-                "video" -> if (videoCodec == null) {
-                    videoCodec = when (codecName) {
-                        "h264" -> MediaFormat.MIMETYPE_VIDEO_AVC
-                        "hevc" -> MediaFormat.MIMETYPE_VIDEO_HEVC
-                        "mpeg4" -> MediaFormat.MIMETYPE_VIDEO_MPEG4
-                        "msmpeg4v3" -> "video/x-msmpeg4v3"
-                        "vp9" -> MediaFormat.MIMETYPE_VIDEO_VP9
-                        "wmv2" -> "video/x-ms-wmv"
-                        else -> "video/vnd.ffmpeg.$codecName"
-                    }
+                "video" -> if (videoCodec == Constants.Transcoder.VideoCodec.UNKNOWN) {
+                    videoCodec = extractVideoCodec(codecName)
                     width = stream.optInt("width", 0)
                     height = stream.optInt("height", 0)
                     videoBitrate = stream.optString("bit_rate").toIntOrNull()
@@ -604,23 +597,12 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
                 }
                 "audio" -> {
                     val trackChannelCount = if (stream.has("channels")) stream.optInt("channels") else null
-                    val mappedMime = when (codecName) {
-                        "aac" -> MediaFormat.MIMETYPE_AUDIO_AAC
-                        "mp3" -> MediaFormat.MIMETYPE_AUDIO_MPEG
-                        "ac3" -> MediaFormat.MIMETYPE_AUDIO_AC3
-                        "eac3" -> MediaFormat.MIMETYPE_AUDIO_EAC3
-                        "dca" -> "audio/vnd.dts"
-                        "dts" -> "audio/vnd.dts"
-                        "flac" -> MediaFormat.MIMETYPE_AUDIO_FLAC
-                        "vorbis" -> MediaFormat.MIMETYPE_AUDIO_VORBIS
-                        "opus" -> MediaFormat.MIMETYPE_AUDIO_OPUS
-                        else -> "audio/vnd.ffmpeg.$codecName"
-                    }
-                    if (audioCodec == null) {
-                        audioCodec = mappedMime
+                    val normalized = extractAudioCodec(codecName)
+                    if (audioCodec == Constants.Transcoder.AudioCodec.UNKNOWN) {
+                        audioCodec = normalized
                         channelCount = trackChannelCount
                     }
-                    audioTracks.add(AudioTrack(index, mappedMime, trackChannelCount, language))
+                    audioTracks.add(AudioTrack(index, normalized, trackChannelCount, language))
                 }
                 "subtitle" -> {
                     val subtitleCodecMime = when (codecName) {
@@ -657,6 +639,53 @@ class MediaCollection(val context: Context, val upnpService: UpnpService) {
      * Inspects an MP4/MOV file's atoms to see if the 'moov' atom appears before 'mdat'.
      * If 'mdat' appears first, the file is unoptimized for streaming/piping.
      */
+    fun resolveSeekByTime(item: MediaNode.Item, timeMs: Long): Pair<Long, Long> {
+        if (item.durationMs <= 0) return Pair(0L, 0L)
+        val time = timeMs.coerceIn(0, item.durationMs)
+        val ratio = time.toDouble() / item.durationMs.toDouble()
+        val byteOffset = (item.size * ratio).toLong().coerceIn(0, item.size - 1)
+        return Pair(time, byteOffset)
+    }
+
+    fun resolveSeekByByte(item: MediaNode.Item, startByte: Long): Pair<Long, Long> {
+        if (item.size <= 0) return Pair(0L, 0L)
+        val byteOffset = startByte.coerceIn(0, item.size - 1)
+        val ratio = byteOffset.toDouble() / item.size.toDouble()
+        val timeMs = (item.durationMs * ratio).toLong().coerceIn(0, item.durationMs)
+        return Pair(timeMs, byteOffset)
+    }
+
+    fun extractVideoCodec(mime: String?): Constants.Transcoder.VideoCodec {
+        if (mime == null) return Constants.Transcoder.VideoCodec.UNKNOWN
+        val lower = mime.lowercase()
+        // 1. Priority variant matching
+        if (lower.contains("avc") || lower.contains("h264")) return Constants.Transcoder.VideoCodec.H264
+        if (lower.contains("hevc") || lower.contains("h265")) return Constants.Transcoder.VideoCodec.HEVC
+        if (lower.contains("wmv") || lower.contains("vc1")) return Constants.Transcoder.VideoCodec.WMV3
+        
+        // 2. Token extraction and Enum matching
+        val token = lower.substringAfterLast("/").removePrefix("x-").removePrefix("vnd.ffmpeg.")
+        return Constants.Transcoder.VideoCodec.entries.find { 
+            it.codecId == token || it.name.lowercase() == token || lower.contains(it.codecId)
+        } ?: Constants.Transcoder.VideoCodec.UNKNOWN
+    }
+
+    fun extractAudioCodec(mime: String?): Constants.Transcoder.AudioCodec {
+        if (mime == null) return Constants.Transcoder.AudioCodec.UNKNOWN
+        val lower = mime.lowercase()
+        // 1. Priority variant matching
+        if (lower.contains("aac") || lower.contains("mp4a-latm")) return Constants.Transcoder.AudioCodec.AAC
+        if (lower.contains("mp3") || lower.contains("mpeg")) return Constants.Transcoder.AudioCodec.MP3
+        if (lower.contains("ac3")) return Constants.Transcoder.AudioCodec.AC3
+        if (lower.contains("dts") || lower.contains("dca")) return Constants.Transcoder.AudioCodec.DCA
+        
+        // 2. Token extraction and Enum matching
+        val token = lower.substringAfterLast("/").removePrefix("x-").removePrefix("vnd.ffmpeg.")
+        return Constants.Transcoder.AudioCodec.entries.find { 
+            it.codecId == token || it.name.lowercase() == token || lower.contains(it.codecId)
+        } ?: Constants.Transcoder.AudioCodec.UNKNOWN
+    }
+
     private fun checkMp4FastStart(pfd: ParcelFileDescriptor): Boolean {
         try {
             val fis = FileInputStream(pfd.fileDescriptor)

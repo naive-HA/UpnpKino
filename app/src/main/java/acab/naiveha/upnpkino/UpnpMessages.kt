@@ -998,7 +998,7 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
                     "&lt;item id=\"0\" parentID=\"-1\" restricted=\"0\"&gt;",
                     "&lt;dc:title&gt;${mediaFile?.name?.xmlEscape()}&lt;/dc:title&gt;",
                     "&lt;upnp:class&gt;object.item.${(if (fileExtension in Constants.musicExtensions) "audioItem.musicTrack" else "videoItem")}&lt;/upnp:class&gt;",
-                    "&lt;res protocolInfo=\"http-get:*:${mediaFile?.mimeType}:DLNA.ORG_OP=01\"&gt;$itemUrl&lt;/res&gt;",
+                    "&lt;res protocolInfo=\"http-get:*:${mediaFile?.mimeType}:DLNA.ORG_OP=10\"&gt;$itemUrl&lt;/res&gt;",
                     "&lt;/item&gt;",
                     "&lt;/DIDL-Lite&gt;",
                     "</CurrentURIMetaData>").joinToString("")
