@@ -103,8 +103,7 @@ abstract class CopyAndRenameBundleTask : DefaultTask() {
 }
 
 abstract class CopyAndRenameApkTask : DefaultTask() {
-    @get:InputDirectory
-    @get:Optional
+    @get:Internal
     abstract val inputDir: DirectoryProperty
 
     @get:OutputFile
