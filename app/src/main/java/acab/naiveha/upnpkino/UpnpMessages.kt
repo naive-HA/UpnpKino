@@ -747,7 +747,6 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
             Log.w("UpnpMessages", "parseDlnaResponse: invalid XML input")
             return responseData
         }
-        Log.w("UpnpMessages", "parseDlnaResponse: $xml")
         try {
             val parser = Xml.newPullParser()
             parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)

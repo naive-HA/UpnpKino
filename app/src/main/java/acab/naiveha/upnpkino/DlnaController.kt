@@ -112,85 +112,6 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                                             null
                                         }
                                     }
-
-
-
-
-
-                                    //TODO remove this
-                                    sinkEntries = "http-get:*:video/mp4:DLNA.ORG_PN=AVC_MP4_MP_HD_720p_AAC".split(",").mapNotNull { raw ->
-                                        val parts = raw.split(":", limit = 4)
-                                        if (parts.size == 4) {
-                                            mapOf("protocol" to parts[0],
-                                                "network" to parts[1],
-                                                "contentFormat" to parts[2].substringBefore(";"),
-                                                "dlnaProfile" to parts[3].split(";")
-                                                    .firstOrNull { it.startsWith("DLNA.ORG_PN=") }
-                                                    ?.substringAfter("DLNA.ORG_PN="))
-                                        } else {
-                                            null
-                                        }
-                                    }
-                                    if (sinkEntries.isEmpty()){
-                                        device.setMediaCollection(deviceMediaCollection)
-                                        return@collect
-                                    }
-                                    val mediaItems = deviceMediaCollection.values.filterIsInstance<MediaCollection.MediaNode.Item>()
-                                    for (item in mediaItems){
-                                        Log.d("DlnaController", "processing: ${item.name} (${item.mimeType})")
-                                        val matchedContentFormat = sinkEntries.filter {
-                                            it["contentFormat"] == "*" || it["contentFormat"].equals(
-                                                item.mimeType,
-                                                ignoreCase = true
-                                            )
-                                        }
-                                        if (!matchedContentFormat.isEmpty()) {
-                                            if (matchedContentFormat.any { it["dlnaProfile"] == null }){
-                                                Log.d("DlnaController", "dlnaProfile is null: remote device accepts anything; file can be natively played")
-                                                continue
-                                            }
-                                            val nativelyPlayed = matchedContentFormat.any { entry ->
-                                                val profile = entry["dlnaProfile"] ?: return@any false
-                                                val profileVideo = item.videoCodec == Constants.Transcoder.VideoCodec.UNKNOWN || (item.dlnaProfileVideo.isNotEmpty() && item.dlnaProfileVideo.all { profile.contains(it) })
-                                                val profileAudio = item.audioCodec == Constants.Transcoder.AudioCodec.UNKNOWN || (item.dlnaProfileAudio.isNotEmpty() && item.dlnaProfileAudio.all { profile.contains(it) })
-                                                profileVideo && profileAudio
-                                            }
-                                            if (nativelyPlayed) {
-                                                Log.d("DlnaController", "natively playable: ${item.name} (${item.mimeType})")
-                                                continue
-                                            }
-                                        }
-
-                                        Log.w("DlnaController", "needs transcoding: ${item.name} (${item.mimeType})")
-
-                                        val canBeTranscoded = true
-                                        if (canBeTranscoded) {
-//                                            deviceMediaCollection[item.id] = item.copy()
-
-                                            continue
-                                        } else {
-                                            val parent = deviceMediaCollection[item.parentId] as? MediaCollection.MediaNode.Container
-                                            if (parent != null) {
-                                                deviceMediaCollection[item.parentId] = parent.copy(children = parent.children - item.id)
-                                            }
-                                            deviceMediaCollection.remove(item.id)
-                                            Log.e("DlnaController", "Cannot be played nor transcoded: ${item.name} (${item.mimeType})")
-                                        }
-                                    }
-                                    val mediaContainers = deviceMediaCollection.values.filterIsInstance<MediaCollection.MediaNode.Container>()
-                                    var foundEmptyContainer = false
-                                    do {
-                                        for (container in mediaContainers){
-                                            if (container.children.isEmpty()){
-                                                foundEmptyContainer = true
-                                                val parent = deviceMediaCollection[container.parentId] as? MediaCollection.MediaNode.Container
-                                                if (parent != null) {
-                                                    deviceMediaCollection[container.parentId] = parent.copy(children = parent.children - container.id)
-                                                }
-                                                deviceMediaCollection.remove(container.id)
-                                            }
-                                        }
-                                    } while (foundEmptyContainer)
                                     device.setMediaCollection(deviceMediaCollection)
                                     return@collect
                                 } else {
@@ -259,6 +180,10 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                             if (target != null && sendMediaCommand(Action.SEEK, mapOf("Target" to target)) != null) {
                                 return@collect
                             } //else ERROR
+                        }
+                        Action.ERROR -> {
+                            repo.setStreamingFlag(null)
+                            resetDlnaActivity()
                         }
                         else -> {
                             Log.e("DlnaController", "Error executing streaming command: $streamingFlag")
@@ -422,6 +347,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                                 delay(PLAYING_PROGRESS_POLL_MS.milliseconds)
                             }
                             ActionFeedback.PAUSED_PLAYBACK -> {
+                                syncSeekBar()
                                 getStreamingFeedbackFlag()
                                 delay(PAUSED_PROGRESS_POLL_MS.milliseconds)
                             }
@@ -526,7 +452,6 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         } catch (e: Exception) {
             Log.e("DlnaController", "Exception sending SOAP command: ${command.actionName}", e)
             repo.setStreamingFlag(Action.ERROR)
-            resetDlnaActivity()
             null
         }
     }

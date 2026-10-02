@@ -30,6 +30,19 @@ android {
         }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        missingDimensionStrategy("distribution", "apk")
+    }
+
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("apk") {
+            dimension = "distribution"
+            applicationId = "acab.naiveha.upnpkino"
+        }
+        create("aab") {
+            dimension = "distribution"
+            applicationId = "acab.naiveha.upnpkino.by.naiveha"
+        }
     }
 
     buildTypes {
@@ -66,29 +79,98 @@ kotlin {
     }
 }
 
-androidComponents {
-    onVariants { variant ->
-        val variantName = variant.name.replaceFirstChar { it.uppercase() }
+abstract class CopyAndRenameBundleTask : DefaultTask() {
+    @get:InputFile
+    @get:Optional
+    abstract val inputBundle: RegularFileProperty
 
-        val apkVersionName = android.defaultConfig.versionName
-        val releaseDir = layout.buildDirectory.dir("../release")
+    @get:OutputFile
+    abstract val outputReleaseFile: RegularFileProperty
 
-        val copyTask = tasks.register<Copy>("copyRenamed${variantName}Apk") {
-            from(variant.artifacts.get(com.android.build.api.artifact.SingleArtifact.APK))
-            include("*.apk")
-            into(releaseDir)
-            rename { _ ->
-                "UPnP.Kino.v${apkVersionName}.apk"
+    @get:OutputFile
+    abstract val outputBuildFile: RegularFileProperty
+
+    @TaskAction
+    fun execute() {
+        val inFile = inputBundle.orNull?.asFile
+        if (inFile != null && inFile.exists()) {
+            outputReleaseFile.get().asFile.parentFile.mkdirs()
+            outputBuildFile.get().asFile.parentFile.mkdirs()
+            inFile.copyTo(outputReleaseFile.get().asFile, overwrite = true)
+            inFile.copyTo(outputBuildFile.get().asFile, overwrite = true)
+        }
+    }
+}
+
+abstract class CopyAndRenameApkTask : DefaultTask() {
+    @get:InputDirectory
+    @get:Optional
+    abstract val inputDir: DirectoryProperty
+
+    @get:OutputFile
+    abstract val outputReleaseFile: RegularFileProperty
+
+    @get:OutputFile
+    abstract val outputBuildFile: RegularFileProperty
+
+    @get:Input
+    abstract val targetFileName: Property<String>
+
+    @TaskAction
+    fun execute() {
+        val inDir = inputDir.orNull?.asFile
+        if (inDir != null && inDir.exists()) {
+            val apkFile = inDir.walkTopDown().firstOrNull { it.isFile && it.extension == "apk" && it.name != targetFileName.get() }
+            if (apkFile != null) {
+                outputReleaseFile.get().asFile.parentFile.mkdirs()
+                outputBuildFile.get().asFile.parentFile.mkdirs()
+                apkFile.copyTo(outputReleaseFile.get().asFile, overwrite = true)
+                apkFile.copyTo(outputBuildFile.get().asFile, overwrite = true)
             }
-            duplicatesStrategy = DuplicatesStrategy.INCLUDE
         }
+    }
+}
 
-        tasks.matching { it.name == "assemble$variantName" }.configureEach {
-            finalizedBy(copyTask)
-        }
+androidComponents {
+    beforeVariants(selector().withBuildType("debug").withFlavor("distribution" to "aab")) { variant ->
+        variant.enable = false
+    }
 
-        tasks.matching { it.name == "create${variantName}ApkListingFileRedirect" }.configureEach {
-            dependsOn(copyTask)
+    onVariants { variant ->
+        val apkVersionName = android.defaultConfig.versionName ?: "1.0"
+        val isAab = variant.productFlavors.any { it.second == "aab" } || variant.name.contains("aab", ignoreCase = true)
+        val ext = if (isAab) "aab" else "apk"
+        val targetName = "UPnP.Kino.v$apkVersionName.$ext"
+        val releaseDir = layout.projectDirectory.dir("../release")
+
+        if (isAab) {
+            val listingTaskName = "produce${variant.name.replaceFirstChar { it.uppercase() }}BundleIdeListingFile"
+            val copyAndRenameTask = tasks.register<CopyAndRenameBundleTask>("copyAndRename${variant.name}Bundle") {
+                inputBundle.set(layout.buildDirectory.file("outputs/bundle/${variant.name}/app-aab-release.aab"))
+                outputReleaseFile.set(releaseDir.file(targetName))
+                outputBuildFile.set(layout.buildDirectory.file("outputs/bundle/${variant.name}/$targetName"))
+            }
+            tasks.matching { it.name == listingTaskName }.configureEach {
+                finalizedBy(copyAndRenameTask)
+            }
+        } else {
+            val assembleTaskName = "assemble${variant.name.replaceFirstChar { it.uppercase() }}"
+            val flavorName = variant.productFlavors.firstOrNull()?.second ?: "apk"
+            val buildTypeName = variant.buildType
+            val listingTaskName = "create${variant.name.replaceFirstChar { it.uppercase() }}ApkListingFileRedirect"
+
+            val copyAndRenameTask = tasks.register<CopyAndRenameApkTask>("copyAndRename${variant.name}Apk") {
+                inputDir.set(layout.buildDirectory.dir("outputs/apk/$flavorName/$buildTypeName"))
+                outputReleaseFile.set(releaseDir.file(targetName))
+                outputBuildFile.set(layout.buildDirectory.file("outputs/apk/$flavorName/$buildTypeName/$targetName"))
+                targetFileName.set(targetName)
+            }
+            tasks.matching { it.name == assembleTaskName }.configureEach {
+                finalizedBy(copyAndRenameTask)
+            }
+            tasks.matching { it.name == listingTaskName }.configureEach {
+                mustRunAfter(copyAndRenameTask)
+            }
         }
     }
 }

@@ -62,12 +62,12 @@ class LicensesActivity : AppCompatActivity() {
                     binding.drawerLayout.closeDrawer(GravityCompat.START)
                     true
                 }
-                R.id.nav_transcoder -> {
-                    val intent = Intent(this, TranscoderActivity::class.java)
-                    startActivity(intent)
-                    binding.drawerLayout.closeDrawer(GravityCompat.START)
-                    true
-                }
+//                R.id.nav_transcoder -> {
+//                    val intent = Intent(this, TranscoderActivity::class.java)
+//                    startActivity(intent)
+//                    binding.drawerLayout.closeDrawer(GravityCompat.START)
+//                    true
+//                }
                 R.id.nav_licenses -> {
                     binding.drawerLayout.closeDrawer(GravityCompat.START)
                     true

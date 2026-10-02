@@ -96,10 +96,10 @@ class TranscoderActivity : AppCompatActivity() {
                     true
                 }
 
-                R.id.nav_transcoder -> {
-                    binding.drawerLayout.closeDrawer(GravityCompat.START)
-                    true
-                }
+//                R.id.nav_transcoder -> {
+//                    binding.drawerLayout.closeDrawer(GravityCompat.START)
+//                    true
+//                }
 
                 R.id.nav_licenses -> {
                     val intent = Intent(this, LicensesActivity::class.java)
@@ -118,7 +118,7 @@ class TranscoderActivity : AppCompatActivity() {
                 else -> false
             }
         }
-        binding.navView.setCheckedItem(R.id.nav_transcoder)
+//        binding.navView.setCheckedItem(R.id.nav_transcoder)
         binding.mediaFile.setOnClickListener {
             Log.d("upnpkino", "tapped the button")
             if (sharedMediaCollection.value.isNotEmpty()) {

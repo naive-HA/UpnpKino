@@ -155,20 +155,20 @@ class ChromecastActivity : AppCompatActivity() {
                 R.id.nav_dlna -> {
                     val intent = Intent(this, DlnaActivity::class.java)
                     startActivity(intent)
+                    binding.drawerLayout.closeDrawer(GravityCompat.START)
+                    true
+                }
+//
+//                R.id.nav_chromecast -> {
 //                    binding.drawerLayout.closeDrawer(GravityCompat.START)
 //                    true
 //                }
-//
-//                R.id.nav_chromecast -> {
-                    binding.drawerLayout.closeDrawer(GravityCompat.START)
-                    true
-                }
-                R.id.nav_transcoder -> {
-                    val intent = Intent(this, TranscoderActivity::class.java)
-                    startActivity(intent)
-                    binding.drawerLayout.closeDrawer(GravityCompat.START)
-                    true
-                }
+//                R.id.nav_transcoder -> {
+//                    val intent = Intent(this, TranscoderActivity::class.java)
+//                    startActivity(intent)
+//                    binding.drawerLayout.closeDrawer(GravityCompat.START)
+//                    true
+//                }
                 R.id.nav_licenses -> {
                     val intent = Intent(this, LicensesActivity::class.java)
                     startActivity(intent)

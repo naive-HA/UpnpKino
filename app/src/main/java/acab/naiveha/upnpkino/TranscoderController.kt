@@ -51,19 +51,32 @@ import androidx.media3.transformer.SurfaceAssetLoader
 import java.io.DataInputStream
 import java.io.EOFException
 import kotlinx.coroutines.CompletableDeferred
+import java.io.OutputStream
 
 class TranscoderController(val context: Context, val upnpService: UpnpService) {
     companion object {
         private const val TAG = "TranscoderController"
         }
     private val repo = UpnpRepository.transcoder
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    internal val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     init {
         scope.launch {
 
         }
     }
-    private fun updateSeekBarPosition(position: String, duration: String) {
+    suspend fun transcodeMediaFile(
+        item: MediaCollection.MediaNode.Item,
+        startTimeMs: Long,
+        targetVideoCodec: Constants.Transcoder.VideoCodec,
+        targetResolution: Constants.Transcoder.Resolution? = null,
+        subtitleTrackIndex: Int? = null,
+        audioTrackIndex: Int = 0,
+        targetAudioCodec: Constants.Transcoder.AudioCodec,
+        responder: (suspend (status: Boolean?, contentType: String, writer: suspend (OutputStream) -> Unit) -> Unit)? = null
+    ): Boolean {
+        return false
+    }
+        private fun updateSeekBarPosition(position: String, duration: String) {
 
     }
     fun release() {
