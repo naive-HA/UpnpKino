@@ -11,7 +11,7 @@
 - **Privacy Focused**: No tracking, no unnecessary permissions.
 
 ## Compatibility
-- **Device Requirements**: Android 8.0 (API 26) or higher.
+- **Device Requirements**: Android 10 (API 29) or higher.
 - **Tested Players**: 
   - **VLC**: Extensively tested on Desktop and Mobile.
   - **eezUPnP**: Confirmed working.
