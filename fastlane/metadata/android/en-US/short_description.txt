@@ -1,1 +1,1 @@
-Uncomplicated simple: Stream audio and/or videos to upnp enabled players, eg VLC
+Uncomplicatedly simple: stream video/audio from your phone to UPnP/DLNA players

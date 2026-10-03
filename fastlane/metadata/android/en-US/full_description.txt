@@ -1,13 +1,26 @@
-Uncomplicated simple: stream your video (mp4, mkv, mov, webm) and/or audio (mp3, m4a, aac, flac, wav, opus) files stored on your Android phone to another phone, tablet, computer or TV set running a compatible video player.
+# UPnP Kino by naiveHA
+**Uncomplicatedly simple**: stream your media library (video and audio) directly from your Android device to any UPnP/DLNA compatible player.
 
-UPnP Kino is compatible with VLC, eezUPnP, Kodi and other upnp enabled players and control points.
+## Features
+- **Wide Format Support**: Stream video (`mp4`, `mkv`, `mov`, `webm`) and audio (`mp3`, `m4a`, `aac`, `flac`, `wav`, `opus`).
+- **Large File Support**: Unlike other legacy apps, UPnP Kino handles files larger than 2GB (perfect for high-quality H264 encodes).
+- **Background Streaming**: Keeps the media server running even when the screen is off or you're using other apps.
+- **Modern Backend**: Built on Eclipse Jetty 12 for reliable performance.
+- **Privacy Focused**: No tracking, no unnecessary permissions.
 
-<b>How does it work?</b>
+## Compatibility
+- **Device Requirements**: Android 10 (API 29) or higher.
+- **Tested Players**: 
+  - **VLC**: Extensively tested on Desktop and Mobile.
+  - **eezUPnP**: Confirmed working.
+  - **Kodi**: Confirmed working. In certain cases, you might need to start Kodi *first*, then start UPnP Kino.
 
-Make sure you are connected to WiFi, select a folder containing your video files and/or a folder containing your audio files and press "Start UPnP Kino". Then open your UPnP compatible video player, like VLC, and navigate to "Browse" on another WiFi connected phone or tablet, or "View/Playlist/Universal Plug'n'Play" on a desktop and enjoy your videos. The app has been extensively tested with VLC, eezUPnP and Kodi, but other UPnP players should work just fine.
+## Permissions Explained
+- **Local Network**: Required to find and connect to players on your WiFi.
+- **Media Access**: Needed to read the files you choose to share. On Android 14+, you can grant access to specific files only.
+- **Notifications**: Used to show server status and provide quick-stop controls.
+- **Wake Lock**: Prevents the stream from dropping if the phone enters deep sleep.
 
-<b>Why not just use PlainUPnP (com.m3sv.plainupnp)?</b>
-
-Well, first of all, it seems that the app has been removed from F-Droid. And, anyway, the app had a bug which made it impossible to stream video files over 2,147,483,647 bytes. Which is just over 2GB. Nowadays, most H264 encoded video files are above 2GB. "UPnP Kino" solves that problem in a fit-for-purpose way.
-
-Enjoy!
+## ☕ Support the Project
+If you find this app useful, consider supporting development!
+**BTC Address**: `1HwgShr1TniuBxNQwy2xAhpQaNuZhtw6sh`
