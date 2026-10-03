@@ -110,7 +110,7 @@
         - Modern Backend: Built on Eclipse Jetty 12 for reliable performance.\n
         - Privacy Focused: No tracking, no unnecessary permissions.\n\n
         Compatibility\n
-        - Device Requirements: Android 8.0 (API 26) or higher.\n
+        - Device Requirements: Android 10.0 (API 29) or higher.\n
         - Tested Players:\n
           - VLC: Extensively tested on Desktop and Mobile.\n
           - eezUPnP: Confirmed working.\n

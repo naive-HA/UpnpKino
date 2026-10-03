@@ -47,100 +47,110 @@
                 <androidx.constraintlayout.widget.ConstraintLayout
                     android:id="@+id/right_side"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
+                    android:layout_height="match_parent"
                     android:padding="16dp">
 
-                    <ImageView
-                        android:id="@+id/button2"
-                        android:layout_width="48dp"
-                        android:layout_height="48dp"
-                        android:layout_marginTop="16dp"
-                        android:background="?attr/selectableItemBackgroundBorderless"
-                        android:clickable="true"
-                        android:contentDescription="@string/select_folder"
-                        android:focusable="true"
-                        android:paddingTop="8dp"
-                        android:paddingStart="8dp"
-                        android:paddingEnd="8dp"
-                        android:src="@drawable/ic_video_library"
-                        app:layout_constraintEnd_toStartOf="@+id/button3"
-                        app:layout_constraintHorizontal_chainStyle="packed"
+                    <androidx.constraintlayout.widget.ConstraintLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        app:layout_constraintTop_toTopOf="parent"
+                        app:layout_constraintBottom_toBottomOf="parent"
                         app:layout_constraintStart_toStartOf="parent"
-                        app:layout_constraintTop_toTopOf="parent" />
+                        app:layout_constraintEnd_toEndOf="parent">
 
-                    <TextView
-                        android:id="@+id/button2_label"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/video_library"
-                        android:textColor="@color/selector_label_text"
-                        app:layout_constraintEnd_toEndOf="@+id/button2"
-                        app:layout_constraintStart_toStartOf="@+id/button2"
-                        app:layout_constraintTop_toBottomOf="@+id/button2" />
+                        <ImageView
+                            android:id="@+id/button2"
+                            android:layout_width="48dp"
+                            android:layout_height="48dp"
+                            android:layout_marginTop="16dp"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:clickable="true"
+                            android:contentDescription="@string/select_folder"
+                            android:focusable="true"
+                            android:paddingTop="8dp"
+                            android:paddingStart="8dp"
+                            android:paddingEnd="8dp"
+                            android:src="@drawable/ic_video_library"
+                            app:layout_constraintEnd_toStartOf="@+id/button3"
+                            app:layout_constraintHorizontal_chainStyle="packed"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toTopOf="parent" />
 
-                    <ImageView
-                        android:id="@+id/button3"
-                        android:layout_width="48dp"
-                        android:layout_height="48dp"
-                        android:layout_marginStart="50dp"
-                        android:background="?attr/selectableItemBackgroundBorderless"
-                        android:clickable="true"
-                        android:contentDescription="@string/select_folder"
-                        android:focusable="true"
-                        android:paddingTop="8dp"
-                        android:paddingStart="8dp"
-                        android:paddingEnd="8dp"
-                        android:src="@drawable/ic_library_music"
-                        app:layout_constraintEnd_toEndOf="parent"
-                        app:layout_constraintStart_toEndOf="@+id/button2"
-                        app:layout_constraintTop_toTopOf="@+id/button2" />
+                        <TextView
+                            android:id="@+id/button2_label"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/video_library"
+                            android:textColor="@color/selector_label_text"
+                            app:layout_constraintEnd_toEndOf="@+id/button2"
+                            app:layout_constraintStart_toStartOf="@+id/button2"
+                            app:layout_constraintTop_toBottomOf="@+id/button2" />
 
-                    <TextView
-                        android:id="@+id/button3_label"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/music_library"
-                        android:textColor="@color/selector_label_text"
-                        app:layout_constraintEnd_toEndOf="@+id/button3"
-                        app:layout_constraintStart_toStartOf="@+id/button3"
-                        app:layout_constraintTop_toBottomOf="@+id/button3" />
+                        <ImageView
+                            android:id="@+id/button3"
+                            android:layout_width="48dp"
+                            android:layout_height="48dp"
+                            android:layout_marginStart="50dp"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:clickable="true"
+                            android:contentDescription="@string/select_folder"
+                            android:focusable="true"
+                            android:paddingTop="8dp"
+                            android:paddingStart="8dp"
+                            android:paddingEnd="8dp"
+                            android:src="@drawable/ic_library_music"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toEndOf="@+id/button2"
+                            app:layout_constraintTop_toTopOf="@+id/button2" />
 
-                    <Button
-                        android:id="@+id/button"
-                        android:layout_width="247dp"
-                        android:layout_height="61dp"
-                        android:layout_marginTop="32dp"
-                        android:text="@string/start_upnp_kino"
-                        app:layout_constraintEnd_toEndOf="parent"
-                        app:layout_constraintStart_toStartOf="parent"
-                        app:layout_constraintTop_toBottomOf="@+id/button2_label" />
+                        <TextView
+                            android:id="@+id/button3_label"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="@string/music_library"
+                            android:textColor="@color/selector_label_text"
+                            app:layout_constraintEnd_toEndOf="@+id/button3"
+                            app:layout_constraintStart_toStartOf="@+id/button3"
+                            app:layout_constraintTop_toBottomOf="@+id/button3" />
 
-                    <TextView
-                        android:id="@+id/status"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:text="@string/status"
-                        android:textAlignment="center"
-                        app:layout_constraintEnd_toEndOf="@+id/button"
-                        app:layout_constraintStart_toStartOf="@+id/button"
-                        app:layout_constraintTop_toBottomOf="@+id/button" />
+                        <Button
+                            android:id="@+id/button"
+                            android:layout_width="247dp"
+                            android:layout_height="61dp"
+                            android:layout_marginTop="32dp"
+                            android:text="@string/start_upnp_kino"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toBottomOf="@+id/button2_label" />
 
-                    <TextView
-                        android:id="@+id/textView2"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="32dp"
-                        android:paddingStart="15dp"
-                        android:paddingEnd="15dp"
-                        android:text="@string/tips_message"
-                        android:textAlignment="center"
-                        android:textColor="@color/darker_grey"
-                        android:textSize="16sp"
-                        app:layout_constraintEnd_toEndOf="parent"
-                        app:layout_constraintStart_toStartOf="parent"
-                        app:layout_constraintTop_toBottomOf="@+id/button"
-                        app:layout_constraintBottom_toBottomOf="parent" />
+                        <TextView
+                            android:id="@+id/status"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp"
+                            android:text="@string/status"
+                            android:textAlignment="center"
+                            app:layout_constraintEnd_toEndOf="@+id/button"
+                            app:layout_constraintStart_toStartOf="@+id/button"
+                            app:layout_constraintTop_toBottomOf="@+id/button" />
+
+                        <TextView
+                            android:id="@+id/textView2"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="32dp"
+                            android:paddingStart="15dp"
+                            android:paddingEnd="15dp"
+                            android:text="@string/tips_message"
+                            android:textAlignment="center"
+                            android:textColor="@color/darker_grey"
+                            android:textSize="16sp"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toBottomOf="@+id/button"
+                            app:layout_constraintBottom_toBottomOf="parent" />
+
+                    </androidx.constraintlayout.widget.ConstraintLayout>
 
                 </androidx.constraintlayout.widget.ConstraintLayout>
             </ScrollView>

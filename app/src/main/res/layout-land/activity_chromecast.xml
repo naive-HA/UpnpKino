@@ -60,152 +60,162 @@
                 <androidx.constraintlayout.widget.ConstraintLayout
                     android:id="@+id/right_side"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
+                    android:layout_height="match_parent"
                     android:padding="16dp">
 
-                    <TextView
-                        android:id="@+id/device"
-                        android:layout_width="wrap_content"
+                    <androidx.constraintlayout.widget.ConstraintLayout
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="16dp"
-                        android:text=""
-                        android:textColor="@color/darker_grey"
-                        android:textSize="13sp"
-                        android:lines="2"
-                        android:gravity="center"
-                        android:background="?attr/selectableItemBackground"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:padding="4dp"
-                        app:layout_constraintEnd_toEndOf="parent"
-                        app:layout_constraintStart_toStartOf="parent"
-                        app:layout_constraintTop_toTopOf="parent" />
-
-                    <TextView
-                        android:id="@+id/media_file"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="16dp"
-                        android:layout_marginStart="16dp"
-                        android:layout_marginEnd="16dp"
-                        android:text="Tap to select media file\n"
-                        android:textColor="@color/darker_grey"
-                        android:textSize="16sp"
-                        android:lines="2"
-                        android:gravity="center"
-                        android:background="?attr/selectableItemBackground"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:padding="4dp"
-                        app:layout_constraintEnd_toEndOf="parent"
-                        app:layout_constraintStart_toStartOf="parent"
-                        app:layout_constraintTop_toBottomOf="@+id/device" />
-
-                    <SeekBar
-                        android:id="@+id/seekBar"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="16dp"
-                        android:layout_marginStart="16dp"
-                        android:layout_marginEnd="16dp"
-                        app:layout_constraintTop_toBottomOf="@+id/media_file"
-                        app:layout_constraintStart_toStartOf="parent"
-                        app:layout_constraintEnd_toEndOf="parent" />
-
-                    <ImageView
-                        android:id="@+id/loading_spinner"
-                        android:layout_width="32dp"
-                        android:layout_height="32dp"
-                        android:visibility="gone"
-                        android:elevation="10dp"
-                        android:src="@drawable/loading_animation"
-                        android:contentDescription="Loading indicator"
-                        app:layout_constraintTop_toTopOf="@+id/seekBar"
-                        app:layout_constraintBottom_toBottomOf="@+id/seekBar"
-                        app:layout_constraintStart_toStartOf="@+id/seekBar"
-                        app:layout_constraintEnd_toEndOf="@+id/seekBar"
-                        tools:visibility="visible" />
-
-                    <LinearLayout
-                        android:id="@+id/time_layout"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:layout_marginStart="24dp"
-                        android:layout_marginEnd="24dp"
-                        app:layout_constraintTop_toBottomOf="@+id/seekBar"
+                        app:layout_constraintTop_toTopOf="parent"
+                        app:layout_constraintBottom_toBottomOf="parent"
                         app:layout_constraintStart_toStartOf="parent"
                         app:layout_constraintEnd_toEndOf="parent">
 
                         <TextView
-                            android:id="@+id/text_position"
-                            android:layout_width="0dp"
+                            android:id="@+id/device"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="00:00:00"
+                            android:layout_marginTop="16dp"
+                            android:text=""
                             android:textColor="@color/darker_grey"
-                            android:textSize="12sp"
-                            android:gravity="start" />
-
-                        <TextView
-                            android:id="@+id/text_duration"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="00:00:00"
-                            android:textColor="@color/darker_grey"
-                            android:textSize="12sp"
-                            android:gravity="end" />
-                    </LinearLayout>
-
-                    <LinearLayout
-                        android:id="@+id/controls_layout"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="16dp"
-                        android:orientation="horizontal"
-                        app:layout_constraintTop_toBottomOf="@+id/time_layout"
-                        app:layout_constraintStart_toStartOf="parent"
-                        app:layout_constraintEnd_toEndOf="parent">
-
-                        <ImageView
-                            android:id="@+id/button_stop"
-                            android:layout_width="64dp"
-                            android:layout_height="64dp"
-                            android:layout_marginEnd="24dp"
-                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:textSize="13sp"
+                            android:lines="2"
+                            android:gravity="center"
+                            android:background="?attr/selectableItemBackground"
                             android:clickable="true"
-                            android:contentDescription="Stop"
                             android:focusable="true"
-                            android:src="@drawable/stop_circle" />
+                            android:padding="4dp"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toTopOf="parent" />
+
+                        <TextView
+                            android:id="@+id/media_file"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="16dp"
+                            android:layout_marginStart="16dp"
+                            android:layout_marginEnd="16dp"
+                            android:text="Tap to select media file\n"
+                            android:textColor="@color/darker_grey"
+                            android:textSize="16sp"
+                            android:lines="2"
+                            android:gravity="center"
+                            android:background="?attr/selectableItemBackground"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:padding="4dp"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toBottomOf="@+id/device" />
+
+                        <SeekBar
+                            android:id="@+id/seekBar"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="16dp"
+                            android:layout_marginStart="16dp"
+                            android:layout_marginEnd="16dp"
+                            app:layout_constraintTop_toBottomOf="@+id/media_file"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintEnd_toEndOf="parent" />
 
                         <ImageView
-                            android:id="@+id/button_play"
-                            android:layout_width="64dp"
-                            android:layout_height="64dp"
+                            android:id="@+id/loading_spinner"
+                            android:layout_width="32dp"
+                            android:layout_height="32dp"
+                            android:visibility="gone"
+                            android:elevation="10dp"
+                            android:src="@drawable/loading_animation"
+                            android:contentDescription="Loading indicator"
+                            app:layout_constraintTop_toTopOf="@+id/seekBar"
+                            app:layout_constraintBottom_toBottomOf="@+id/seekBar"
+                            app:layout_constraintStart_toStartOf="@+id/seekBar"
+                            app:layout_constraintEnd_toEndOf="@+id/seekBar"
+                            tools:visibility="visible" />
+
+                        <LinearLayout
+                            android:id="@+id/time_layout"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
                             android:layout_marginStart="24dp"
-                            android:background="?attr/selectableItemBackgroundBorderless"
-                            android:clickable="true"
-                            android:contentDescription="Play"
-                            android:focusable="true"
-                            android:src="@drawable/play_circle" />
-                    </LinearLayout>
+                            android:layout_marginEnd="24dp"
+                            app:layout_constraintTop_toBottomOf="@+id/seekBar"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintEnd_toEndOf="parent">
 
-                    <TextView
-                        android:id="@+id/textView2"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="32dp"
-                        android:paddingStart="15dp"
-                        android:paddingEnd="15dp"
-                        android:text="@string/tips_message"
-                        android:textAlignment="center"
-                        android:textColor="@color/darker_grey"
-                        android:textSize="16sp"
-                        app:layout_constraintEnd_toEndOf="parent"
-                        app:layout_constraintStart_toStartOf="parent"
-                        app:layout_constraintTop_toBottomOf="@+id/controls_layout"
-                        app:layout_constraintBottom_toBottomOf="parent" />
+                            <TextView
+                                android:id="@+id/text_position"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="00:00:00"
+                                android:textColor="@color/darker_grey"
+                                android:textSize="12sp"
+                                android:gravity="start" />
+
+                            <TextView
+                                android:id="@+id/text_duration"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="00:00:00"
+                                android:textColor="@color/darker_grey"
+                                android:textSize="12sp"
+                                android:gravity="end" />
+                        </LinearLayout>
+
+                        <LinearLayout
+                            android:id="@+id/controls_layout"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="16dp"
+                            android:orientation="horizontal"
+                            app:layout_constraintTop_toBottomOf="@+id/time_layout"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintEnd_toEndOf="parent">
+
+                            <ImageView
+                                android:id="@+id/button_stop"
+                                android:layout_width="64dp"
+                                android:layout_height="64dp"
+                                android:layout_marginEnd="24dp"
+                                android:background="?attr/selectableItemBackgroundBorderless"
+                                android:clickable="true"
+                                android:contentDescription="Stop"
+                                android:focusable="true"
+                                android:src="@drawable/stop_circle" />
+
+                            <ImageView
+                                android:id="@+id/button_play"
+                                android:layout_width="64dp"
+                                android:layout_height="64dp"
+                                android:layout_marginStart="24dp"
+                                android:background="?attr/selectableItemBackgroundBorderless"
+                                android:clickable="true"
+                                android:contentDescription="Play"
+                                android:focusable="true"
+                                android:src="@drawable/play_circle" />
+                        </LinearLayout>
+
+                        <TextView
+                            android:id="@+id/textView2"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="32dp"
+                            android:paddingStart="15dp"
+                            android:paddingEnd="15dp"
+                            android:text="@string/tips_message"
+                            android:textAlignment="center"
+                            android:textColor="@color/darker_grey"
+                            android:textSize="16sp"
+                            app:layout_constraintEnd_toEndOf="parent"
+                            app:layout_constraintStart_toStartOf="parent"
+                            app:layout_constraintTop_toBottomOf="@+id/controls_layout"
+                            app:layout_constraintBottom_toBottomOf="parent" />
+
+                    </androidx.constraintlayout.widget.ConstraintLayout>
 
                 </androidx.constraintlayout.widget.ConstraintLayout>
             </ScrollView>
