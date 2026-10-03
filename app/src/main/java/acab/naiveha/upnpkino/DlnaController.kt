@@ -27,7 +27,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         private const val SUBSCRIPTION_TIMEOUT = 3_600
         private const val PLAYING_PROGRESS_POLL_MS = 1_000L
         private const val BACKGROUND_PROGRESS_POLL_MS = 10_000L
-        private const val PAUSED_PROGRESS_POLL_MS = 4_000L
+        private const val PAUSED_PROGRESS_POLL_MS = 1_000L
         private const val HTTP_TIMEOUT = 5L
     }
     private val repo = UpnpRepository.dlna
@@ -199,7 +199,8 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                 val deviceId = repo.selectedDeviceId.value
                 val streamingFlag = repo.streamingFlag.value
                 if (deviceId != null && streamingFeedbackFlag != null && streamingFlag in listOf(Action.PLAY, Action.PAUSE, Action.SEEK)) {
-                     when (streamingFeedbackFlag) {
+                    Log.d("DlnaController", "streamingFeedbackFlag set to: $streamingFeedbackFlag")
+                    when (streamingFeedbackFlag) {
                         ActionFeedback.STOPPED,
                         ActionFeedback.NO_MEDIA_PRESENT -> {
                             stopPlaying()
