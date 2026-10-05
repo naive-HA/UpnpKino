@@ -18,30 +18,62 @@ android {
         minSdk = 29
         //noinspection EditedTargetSdkVersion
         targetSdk = 37
-        versionCode = 11
+        versionCode = 12
         val version = 4
         val versionMajor = 0
-        val versionMinor = 0
+        val versionMinor = 1
         versionName = "${version}.${versionMajor}.${versionMinor}"
 
-        ndk {
-            //noinspection ChromeOsAbiSupport
-            abiFilters += listOf("arm64-v8a")
-        }
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        missingDimensionStrategy("distribution", "apk")
+        missingDimensionStrategy("distribution", "arm64")
     }
 
     flavorDimensions += "distribution"
     productFlavors {
-        create("apk") {
+        create("arm64") {
             dimension = "distribution"
             applicationId = "acab.naiveha.upnpkino"
+            versionCode = 2011
+            ndk {
+                //noinspection ChromeOsAbiSupport
+                abiFilters += "arm64-v8a"
+            }
+        }
+        create("armv7") {
+            dimension = "distribution"
+            applicationId = "acab.naiveha.upnpkino"
+            versionCode = 1011
+            ndk {
+                //noinspection ChromeOsAbiSupport
+                abiFilters += "armeabi-v7a"
+            }
+        }
+        create("x86") {
+            dimension = "distribution"
+            applicationId = "acab.naiveha.upnpkino"
+            versionCode = 3011
+            ndk {
+                //noinspection ChromeOsAbiSupport
+                abiFilters += "x86"
+            }
+        }
+        create("x86_64") {
+            dimension = "distribution"
+            applicationId = "acab.naiveha.upnpkino"
+            versionCode = 4011
+            ndk {
+                //noinspection ChromeOsAbiSupport
+                abiFilters += "x86_64"
+            }
         }
         create("aab") {
             dimension = "distribution"
             applicationId = "acab.naiveha.upnpkino.by.naiveha"
+            versionCode = 11
+            ndk {
+                //noinspection ChromeOsAbiSupport
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            }
         }
     }
 
@@ -106,25 +138,42 @@ abstract class CopyAndRenameApkTask : DefaultTask() {
     @get:Internal
     abstract val inputDir: DirectoryProperty
 
-    @get:OutputFile
-    abstract val outputReleaseFile: RegularFileProperty
-
-    @get:OutputFile
-    abstract val outputBuildFile: RegularFileProperty
+    @get:Input
+    abstract val apkVersionName: Property<String>
 
     @get:Input
-    abstract val targetFileName: Property<String>
+    abstract val flavorName: Property<String>
+
+    @get:OutputDirectory
+    abstract val releaseDir: DirectoryProperty
 
     @TaskAction
     fun execute() {
         val inDir = inputDir.orNull?.asFile
-        if (inDir != null && inDir.exists()) {
-            val apkFile = inDir.walkTopDown().firstOrNull { it.isFile && it.extension == "apk" && it.name != targetFileName.get() }
+        val version = apkVersionName.get()
+        val flavor = flavorName.get()
+        val relDir = releaseDir.orNull?.asFile
+        if (inDir != null && inDir.exists() && relDir != null) {
+            relDir.mkdirs()
+            val apkFile = inDir.walkTopDown().firstOrNull { it.isFile && it.extension == "apk" }
             if (apkFile != null) {
-                outputReleaseFile.get().asFile.parentFile.mkdirs()
-                outputBuildFile.get().asFile.parentFile.mkdirs()
-                apkFile.copyTo(outputReleaseFile.get().asFile, overwrite = true)
-                apkFile.copyTo(outputBuildFile.get().asFile, overwrite = true)
+                val names = when (flavor) {
+                    "arm64" -> listOf("UPnP.Kino.v$version-arm64-v8a.apk")
+                    "armv7" -> listOf("UPnP.Kino.v$version-armeabi-v7a.apk")
+                    "x86" -> listOf("UPnP.Kino.v$version-x86.apk")
+                    "x86_64" -> listOf("UPnP.Kino.v$version-x86_64.apk")
+                    else -> listOf("UPnP.Kino.v$version-$flavor.apk")
+                }
+                for (targetName in names) {
+                    val destFile = relDir.resolve(targetName)
+                    if (apkFile.absolutePath != destFile.absolutePath) {
+                        apkFile.copyTo(destFile, overwrite = true)
+                    }
+                    val buildDestFile = apkFile.parentFile.resolve(targetName)
+                    if (apkFile.absolutePath != buildDestFile.absolutePath) {
+                        apkFile.copyTo(buildDestFile, overwrite = true)
+                    }
+                }
             }
         }
     }
@@ -137,7 +186,8 @@ androidComponents {
 
     onVariants { variant ->
         val apkVersionName = android.defaultConfig.versionName ?: "1.0"
-        val isAab = variant.productFlavors.any { it.second == "aab" } || variant.name.contains("aab", ignoreCase = true)
+        val flavorName = variant.productFlavors.firstOrNull()?.second ?: "arm64"
+        val isAab = flavorName == "aab" || variant.name.contains("aab", ignoreCase = true)
         val ext = if (isAab) "aab" else "apk"
         val targetName = "UPnP.Kino.v$apkVersionName.$ext"
         val releaseDir = layout.projectDirectory.dir("../release")
@@ -154,15 +204,17 @@ androidComponents {
             }
         } else {
             val assembleTaskName = "assemble${variant.name.replaceFirstChar { it.uppercase() }}"
-            val flavorName = variant.productFlavors.firstOrNull()?.second ?: "apk"
             val buildTypeName = variant.buildType
             val listingTaskName = "create${variant.name.replaceFirstChar { it.uppercase() }}ApkListingFileRedirect"
 
+            val targetVersionName = apkVersionName
+            val targetReleaseDir = releaseDir
+            val targetFlavor = flavorName
             val copyAndRenameTask = tasks.register<CopyAndRenameApkTask>("copyAndRename${variant.name}Apk") {
                 inputDir.set(layout.buildDirectory.dir("outputs/apk/$flavorName/$buildTypeName"))
-                outputReleaseFile.set(releaseDir.file(targetName))
-                outputBuildFile.set(layout.buildDirectory.file("outputs/apk/$flavorName/$buildTypeName/$targetName"))
-                targetFileName.set(targetName)
+                this.apkVersionName.set(targetVersionName)
+                this.flavorName.set(targetFlavor)
+                this.releaseDir.set(targetReleaseDir)
             }
             tasks.matching { it.name == assembleTaskName }.configureEach {
                 finalizedBy(copyAndRenameTask)

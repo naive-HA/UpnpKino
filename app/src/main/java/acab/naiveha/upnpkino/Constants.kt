@@ -202,21 +202,26 @@ object Constants {
         }
 
         // Audio codecs; testChannels is used for capability probing.
-        enum class AudioCodec(val codecId: String, val testChannels: Int, val softwareEncoder: String? = null) {
-            UNKNOWN("unknown", 0),
-            AAC("aac", 2, "aac"),
-            AC3("ac3", 6, "ac3"),
-            EAC3("eac3", 6),
-            DCA("dca", 6),
-            MP3("mp3", 2),
-            OPUS("opus", 2),
-            VORBIS("vorbis", 2),
-            FLAC("flac", 2),
-            ALAC("alac", 2),
-            MLP("mlp", 8),
-            TRUEHD("truehd", 8),
-            PCM_S16LE("pcm_s16le", 2),
-            WMAV2("wmav2", 2);
+        enum class AudioCodec(
+            val codecId: String,
+            val testChannels: Int,
+            val softwareEncoder: String? = null,
+            val defaultBitrateKbps: Int = 128
+        ) {
+            UNKNOWN("unknown", 0, defaultBitrateKbps = 0),
+            AAC("aac", 2, "aac", defaultBitrateKbps = 128),
+            AC3("ac3", 6, "ac3", defaultBitrateKbps = 384),
+            EAC3("eac3", 6, defaultBitrateKbps = 448),
+            DCA("dca", 6, defaultBitrateKbps = 384),
+            MP3("mp3", 2, defaultBitrateKbps = 192),
+            OPUS("opus", 2, defaultBitrateKbps = 128),
+            VORBIS("vorbis", 2, defaultBitrateKbps = 128),
+            FLAC("flac", 2, defaultBitrateKbps = 700),
+            ALAC("alac", 2, defaultBitrateKbps = 700),
+            MLP("mlp", 8, defaultBitrateKbps = 640),
+            TRUEHD("truehd", 8, defaultBitrateKbps = 640),
+            PCM_S16LE("pcm_s16le", 2, defaultBitrateKbps = 1411),
+            WMAV2("wmav2", 2, defaultBitrateKbps = 128);
 
             val encoderId: String get() = softwareEncoder ?: "UNKNOWN"
         }
@@ -230,6 +235,304 @@ object Constants {
             HD_720(1280, 720, 4_000),
             HD_1080(1920, 1080, 8_000),
             UHD_4K(3840, 2160, 20_000)
+        }
+        enum class AudioQuality(val channelCount: Int, val targetBitrateKbps: Int, val ffmpegLayoutName: String? = null) {
+            MONO(1, 64, null),
+            STEREO(2, 128, null),
+            SURROUND_5_1(6, 384, "5.1");
+
+            val bitrateBps: Int get() = targetBitrateKbps * 1000
+        }
+
+        data class TranscodeProfile(
+            val videoCodec: VideoCodec,
+            val resolution: Resolution,
+            val audioCodec: AudioCodec,
+            val audioQuality: AudioQuality,
+            val container: Container
+        ) {
+            val estimatedBitrateKbps: Int
+                get() = resolution.targetBitrateKbps + audioQuality.targetBitrateKbps
+        }
+
+        object Priority {
+            /** All video codecs ordered by quality/efficiency preference */
+            val VIDEO_CODECS = listOf(
+                VideoCodec.HEVC,
+                VideoCodec.H264,
+                VideoCodec.AV1,
+                VideoCodec.VP9,
+                VideoCodec.VP8,
+                VideoCodec.MPEG4,
+                VideoCodec.MPEG2,
+                VideoCodec.WMV3,
+                VideoCodec.VC1,
+                VideoCodec.MJPEG,
+                VideoCodec.PRORES,
+                VideoCodec.DNXHD
+            )
+
+            val RESOLUTIONS = listOf(
+                Resolution.UHD_4K,
+                Resolution.HD_1080,
+                Resolution.HD_720,
+                Resolution.SD
+            )
+
+            /** All audio codecs ordered by quality preference */
+            val AUDIO_CODECS = listOf(
+                AudioCodec.TRUEHD,
+                AudioCodec.MLP,
+                AudioCodec.FLAC,
+                AudioCodec.ALAC,
+                AudioCodec.DCA,
+                AudioCodec.EAC3,
+                AudioCodec.AC3,
+                AudioCodec.AAC,
+                AudioCodec.OPUS,
+                AudioCodec.VORBIS,
+                AudioCodec.MP3,
+                AudioCodec.PCM_S16LE,
+                AudioCodec.WMAV2
+            )
+
+            val AUDIO_QUALITIES = listOf(
+                AudioQuality.SURROUND_5_1,
+                AudioQuality.STEREO,
+                AudioQuality.MONO
+            )
+
+            val CONTAINERS = listOf(
+                Container.MP4,
+                Container.MKV,
+                Container.MPEG_TS
+            )
+        }
+
+        /**
+         * Represents a single parsed DLNA sink profile entry from a protocolInfo list.
+         */
+        data class SinkProfile(
+            val videoCodec: VideoCodec?,
+            val audioCodec: AudioCodec?,
+            val maxResolution: Resolution?,
+            val maxChannels: Int?,
+            val container: Container?
+        )
+
+        /**
+         * Aggregates all advertised sinks from a DLNA device.
+         */
+        data class SinkCapabilities(
+            val profiles: List<SinkProfile>,
+            val isWildcard: Boolean = false
+        ) {
+            fun supportsVideoCodec(codec: VideoCodec): Boolean =
+                isWildcard || profiles.isEmpty() || profiles.any { it.videoCodec == null || it.videoCodec == codec }
+
+            fun supportsResolution(resolution: Resolution): Boolean =
+                isWildcard || profiles.isEmpty() || profiles.any { it.maxResolution == null || it.maxResolution.maxHeight >= resolution.maxHeight }
+
+            fun supportsAudioCodec(codec: AudioCodec): Boolean =
+                isWildcard || profiles.isEmpty() || profiles.any { it.audioCodec == null || it.audioCodec == codec }
+
+            fun supportsChannelCount(channels: Int): Boolean =
+                isWildcard || profiles.isEmpty() || profiles.any { it.maxChannels == null || it.maxChannels >= channels }
+
+            fun supportsContainer(container: Container): Boolean =
+                isWildcard || profiles.isEmpty() || profiles.any { it.container == null || it.container == container }
+
+            fun supportsCombination(
+                videoCodec: VideoCodec,
+                resolution: Resolution,
+                audioCodec: AudioCodec,
+                audioQuality: AudioQuality,
+                container: Container
+            ): Boolean {
+                if (isWildcard || profiles.isEmpty()) return true
+                return profiles.any { p ->
+                    (p.videoCodec == null || p.videoCodec == videoCodec) &&
+                    (p.maxResolution == null || p.maxResolution.maxHeight >= resolution.maxHeight) &&
+                    (p.audioCodec == null || p.audioCodec == audioCodec) &&
+                    (p.maxChannels == null || p.maxChannels >= audioQuality.channelCount) &&
+                    (p.container == null || p.container == container)
+                }
+            }
+
+            companion object {
+                /**
+                 * Parses a raw DLNA comma-separated SinkProtocolInfo response string into SinkCapabilities.
+                 */
+                fun fromProtocolInfo(rawSinkString: String): SinkCapabilities {
+                    if (rawSinkString.isBlank() || rawSinkString.contains("*:*:*") || rawSinkString.contains("video/*")) {
+                        return SinkCapabilities(emptyList(), isWildcard = true)
+                    }
+
+                    val parsedProfiles = rawSinkString.split(",")
+                        .map { it.trim() }
+                        .filter { it.startsWith("http-get:") }
+                        .mapNotNull { parseSingleSink(it) }
+
+                    val isWildcardDetected = rawSinkString.contains("*") && parsedProfiles.isEmpty()
+
+                    return SinkCapabilities(parsedProfiles, isWildcard = isWildcardDetected)
+                }
+
+                private fun parseSingleSink(sinkString: String): SinkProfile? {
+                    val parts = sinkString.split(":")
+                    if (parts.size < 3) return null
+
+                    val mimeType = parts[2].lowercase()
+                    val dlnaFeatures = parts.getOrNull(3)?.uppercase() ?: ""
+
+                    // Resolve Container from MIME type
+                    val container = when {
+                        mimeType.contains("mp4") -> Container.MP4
+                        mimeType.contains("matroska") || mimeType.contains("mkv") || mimeType.contains("webm") -> Container.MKV
+                        mimeType.contains("mpegts") || mimeType.contains("transportstream") || mimeType.contains("ts") -> Container.MPEG_TS
+                        else -> null
+                    }
+
+                    // Resolve Video Codec from MIME or DLNA.ORG_PN profile name
+                    val videoCodec = when {
+                        dlnaFeatures.contains("HEVC") || mimeType.contains("hevc") || mimeType.contains("h265") -> VideoCodec.HEVC
+                        dlnaFeatures.contains("AVC") || mimeType.contains("h264") || mimeType.contains("avc") -> VideoCodec.H264
+                        dlnaFeatures.contains("AV1") || mimeType.contains("av1") || mimeType.contains("av01") -> VideoCodec.AV1
+                        dlnaFeatures.contains("VP9") || mimeType.contains("vp9") || mimeType.contains("vp09") -> VideoCodec.VP9
+                        dlnaFeatures.contains("VP8") || mimeType.contains("vp8") -> VideoCodec.VP8
+                        mimeType.contains("mpeg4") || mimeType.contains("mp4v") -> VideoCodec.MPEG4
+                        mimeType.contains("mpeg2") || mimeType.contains("mpeg-2") -> VideoCodec.MPEG2
+                        mimeType.contains("wmv3") || mimeType.contains("wmv") -> VideoCodec.WMV3
+                        mimeType.contains("vc1") || mimeType.contains("vc-1") -> VideoCodec.VC1
+                        mimeType.contains("mjpeg") || mimeType.contains("jpeg") -> VideoCodec.MJPEG
+                        mimeType.contains("prores") -> VideoCodec.PRORES
+                        mimeType.contains("dnxhd") -> VideoCodec.DNXHD
+                        else -> null
+                    }
+
+                    // Resolve Resolution from DLNA profile string
+                    val maxResolution = when {
+                        dlnaFeatures.contains("4K") || dlnaFeatures.contains("2160") || dlnaFeatures.contains("UHD") -> Resolution.UHD_4K
+                        dlnaFeatures.contains("1080") || dlnaFeatures.contains("FHD") -> Resolution.HD_1080
+                        dlnaFeatures.contains("720") || dlnaFeatures.contains("HD") -> Resolution.HD_720
+                        dlnaFeatures.contains("SD") || dlnaFeatures.contains("480") || dlnaFeatures.contains("576") -> Resolution.SD
+                        else -> null // Wildcard / unspecified resolution
+                    }
+
+                    // Resolve Audio Codec from MIME or DLNA.ORG_PN profile name
+                    val audioCodec = when {
+                        dlnaFeatures.contains("TRUEHD") || mimeType.contains("truehd") -> AudioCodec.TRUEHD
+                        dlnaFeatures.contains("MLP") || mimeType.contains("mlp") -> AudioCodec.MLP
+                        dlnaFeatures.contains("FLAC") || mimeType.contains("flac") -> AudioCodec.FLAC
+                        dlnaFeatures.contains("ALAC") || mimeType.contains("alac") -> AudioCodec.ALAC
+                        dlnaFeatures.contains("DCA") || dlnaFeatures.contains("DTS") || mimeType.contains("dts") || mimeType.contains("dca") -> AudioCodec.DCA
+                        dlnaFeatures.contains("EAC3") || dlnaFeatures.contains("EC3") || mimeType.contains("eac3") || mimeType.contains("ec-3") -> AudioCodec.EAC3
+                        dlnaFeatures.contains("AC3") || mimeType.contains("ac3") -> AudioCodec.AC3
+                        dlnaFeatures.contains("AAC") || mimeType.contains("aac") || mimeType.contains("mp4a") -> AudioCodec.AAC
+                        dlnaFeatures.contains("OPUS") || mimeType.contains("opus") -> AudioCodec.OPUS
+                        dlnaFeatures.contains("VORBIS") || mimeType.contains("vorbis") -> AudioCodec.VORBIS
+                        dlnaFeatures.contains("MP3") || mimeType.contains("mp3") || mimeType.contains("mpeg") -> AudioCodec.MP3
+                        mimeType.contains("pcm") || mimeType.contains("raw") -> AudioCodec.PCM_S16LE
+                        mimeType.contains("wma") -> AudioCodec.WMAV2
+                        else -> null
+                    }
+
+                    val maxChannels = when {
+                        dlnaFeatures.contains("7_1") || dlnaFeatures.contains("8CH") -> 8
+                        dlnaFeatures.contains("5_1") || dlnaFeatures.contains("6CH") -> 6
+                        dlnaFeatures.contains("2CH") || dlnaFeatures.contains("STEREO") -> 2
+                        else -> null
+                    }
+
+                    return SinkProfile(
+                        videoCodec = videoCodec,
+                        audioCodec = audioCodec,
+                        maxResolution = maxResolution,
+                        maxChannels = maxChannels,
+                        container = container
+                    )
+                }
+            }
+        }
+
+        /**
+         * Resolves the optimal TranscodeProfile using a 5-step dimensional evaluation.
+         *
+         * If the DLNA device advertises a wildcard sink ('*') or directly supports the source
+         * file's native video/audio codecs, resolution, quality, and container, serving the
+         * native file directly is preferred (minimum effort, zero transcoding).
+         *
+         * Returns null if transcoding is required but any step cannot find a valid candidate.
+         */
+        fun resolveTranscodeTarget(
+            sourceItem: MediaCollection.MediaNode.Item,
+            sink: SinkCapabilities,
+            canEncodeVideo: (VideoCodec) -> Boolean,
+            canEncodeVideoAtRes: (VideoCodec, Resolution) -> Boolean,
+            canEncodeAudio: (AudioCodec) -> Boolean
+        ): TranscodeProfile? {
+            val sourceVideoCodec = sourceItem.videoTracks.firstOrNull()?.codec
+            val sourceAudioCodec = sourceItem.audioTracks.firstOrNull()?.codec
+            val sourceHeight = sourceItem.videoTracks.firstOrNull()?.resolution
+                ?.split("x")?.getOrNull(1)?.toIntOrNull() ?: 1080
+            val sourceTier = Priority.RESOLUTIONS.sortedBy { it.maxHeight }.find { it.maxHeight >= sourceHeight } ?: Resolution.HD_1080
+            val sourceChannels = sourceItem.audioTracks.firstOrNull()?.channelCount ?: 2
+            val sourceAudioQuality = Priority.AUDIO_QUALITIES.find { it.channelCount <= sourceChannels } ?: AudioQuality.STEREO
+            val sourceExt = sourceItem.name.substringAfterLast('.', "").lowercase()
+            val sourceContainer = when {
+                sourceExt in setOf("mkv") -> Container.MKV
+                sourceExt in setOf("ts", "mts") -> Container.MPEG_TS
+                else -> Container.MP4
+            }
+
+            // Prefer Native / Minimum Effort: If sink accepts wildcard '*' or supports native source profile directly
+            if (sink.isWildcard || (
+                sourceVideoCodec != null && sink.supportsVideoCodec(sourceVideoCodec) &&
+                sink.supportsResolution(sourceTier) &&
+                sourceAudioCodec != null && sink.supportsAudioCodec(sourceAudioCodec) &&
+                sink.supportsChannelCount(sourceAudioQuality.channelCount) &&
+                sink.supportsContainer(sourceContainer)
+            )) {
+                return TranscodeProfile(
+                    videoCodec = sourceVideoCodec ?: VideoCodec.H264,
+                    resolution = sourceTier,
+                    audioCodec = sourceAudioCodec ?: AudioCodec.AAC,
+                    audioQuality = sourceAudioQuality,
+                    container = sourceContainer
+                )
+            }
+
+            // Downward-only evaluation: Candidates start strictly at source tier & channel count and only go downwards
+            val candidateResolutions = Priority.RESOLUTIONS.filter { it.maxHeight <= sourceTier.maxHeight }
+            val candidateAudioQualities = Priority.AUDIO_QUALITIES.filter { it.channelCount <= sourceChannels }
+
+            for (videoCodec in Priority.VIDEO_CODECS) {
+                if (!canEncodeVideo(videoCodec)) continue
+
+                for (resolution in candidateResolutions) {
+                    if (!canEncodeVideoAtRes(videoCodec, resolution)) continue
+
+                    for (audioCodec in Priority.AUDIO_CODECS) {
+                        if (!canEncodeAudio(audioCodec)) continue
+
+                        for (audioQuality in candidateAudioQualities) {
+
+                            for (container in Priority.CONTAINERS) {
+                                if (sink.supportsCombination(videoCodec, resolution, audioCodec, audioQuality, container)) {
+                                    return TranscodeProfile(
+                                        videoCodec = videoCodec,
+                                        resolution = resolution,
+                                        audioCodec = audioCodec,
+                                        audioQuality = audioQuality,
+                                        container = container
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return null // Return null if no single sink entry supports a valid combination the phone can encode
         }
     }
 }

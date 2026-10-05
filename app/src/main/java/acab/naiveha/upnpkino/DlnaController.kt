@@ -26,8 +26,8 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         private const val SUBSCRIPTION_POLL_MS = 1_000L
         private const val SUBSCRIPTION_TIMEOUT = 3_600
         private const val PLAYING_PROGRESS_POLL_MS = 1_000L
+        private const val PAUSED_PROGRESS_POLL_MS = 2_000L
         private const val BACKGROUND_PROGRESS_POLL_MS = 10_000L
-        private const val PAUSED_PROGRESS_POLL_MS = 1_000L
         private const val HTTP_TIMEOUT = 5L
     }
     private val repo = UpnpRepository.dlna
@@ -85,7 +85,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                         .addHeader("SOAPACTION", "\"$serviceUrn#${command.actionName}\"")
                         .build()
                     client.newCall(request).execute().use { response ->
-                        val responseBody = response.body?.string() ?: ""
+                        val responseBody = response.body.string()
                         Log.d("DlnaController", "SOAP command ${command.actionName} response: code=${response.code}")
                         if (response.isSuccessful && responseBody.isNotEmpty()) {
                             val expectedResponse = command.responseName
@@ -128,6 +128,13 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                 }
             }
         }
+
+
+
+
+
+
+        
         scope.launch {
             repo.streamingFlag.collect { streamingFlag ->
                 if (streamingFlag != null) {
@@ -438,7 +445,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                 .addHeader("SOAPACTION", "\"$serviceUrn#${command.actionName}\"")
                 .build()
             client.newCall(request).execute().use { response ->
-                val responseBody = response.body?.string() ?: ""
+                val responseBody = response.body.string()
                 Log.d("DlnaController", "SOAP command ${command.actionName} response: code=${response.code}")
                 if (response.isSuccessful && responseBody.isNotEmpty()) {
                     val expectedResponse = command.responseName
@@ -536,8 +543,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                 .build()
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
-                    val responseBody = response.body?.string() ?: ""
-//                    Log.d("DlnaController", "Interrogate response: $responseBody")
+                    val responseBody = response.body.string()
                     upnpService.upnpMessages.parseUpnpDescription(responseBody)
                 } else {
                     null

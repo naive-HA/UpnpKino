@@ -901,7 +901,7 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
                 "&lt;upnp:albumArtURI xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\" dlna:profileID=\"PNG_TN\"&gt;http://${upnpService.configuration.getIpAddress()}:${upnpService.configuration.getHttpServerPort()}/${upnpService.configuration.uuid}/icon&lt;/upnp:albumArtURI&gt;",
                 if (fileExtension in Constants.musicExtensions) "&lt;upnp:album/&gt;" else "",
                 if (fileExtension in Constants.musicExtensions) "&lt;upnp:artist role=\"Performer\"/&gt;" else "",
-                "&lt;res protocolInfo=\"http-get:*:${node.mimeType}:*\" size=\"${node.size}\" duration=\"${node.duration}\" resolution=\"${node.resolution}\"&gt;${node.url.xmlEscape()}&lt;/res&gt;",
+                "&lt;res protocolInfo=\"http-get:*:${node.mimeType}:DLNA.ORG_OP=01\" size=\"${node.size}\" duration=\"${node.duration}\" resolution=\"${node.resolution}\"&gt;${node.url.xmlEscape()}&lt;/res&gt;",
                 "&lt;/item&gt;").joinToString("")
         }
         return metadata
@@ -997,7 +997,7 @@ class UpnpMessages(val context: Context, val upnpService: UpnpService) {
                     "&lt;item id=\"0\" parentID=\"-1\" restricted=\"0\"&gt;",
                     "&lt;dc:title&gt;${mediaFile?.name?.xmlEscape()}&lt;/dc:title&gt;",
                     "&lt;upnp:class&gt;object.item.${(if (fileExtension in Constants.musicExtensions) "audioItem.musicTrack" else "videoItem")}&lt;/upnp:class&gt;",
-                    "&lt;res protocolInfo=\"http-get:*:${mediaFile?.mimeType}:DLNA.ORG_OP=10\"&gt;$itemUrl&lt;/res&gt;",
+                    "&lt;res protocolInfo=\"http-get:*:${mediaFile?.mimeType}:DLNA.ORG_OP=01\"&gt;$itemUrl&lt;/res&gt;",
                     "&lt;/item&gt;",
                     "&lt;/DIDL-Lite&gt;",
                     "</CurrentURIMetaData>").joinToString("")

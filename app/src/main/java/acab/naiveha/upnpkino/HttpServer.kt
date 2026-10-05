@@ -190,7 +190,7 @@ class HttpServer(private val context: Context, val upnpService: UpnpService) {
                                     callback.succeeded()
                                     return true
                                 }
-
+                                Log.d("HttpServer", request.headers.asString())
                                 val rangeHeader = request.headers.get(HttpHeader.RANGE.asString())
                                 val timeSeekHeader = request.headers.get("TimeSeekRange.dlna.org")
                                 val startChunk = if (timeSeekHeader != null) {
