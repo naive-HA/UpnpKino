@@ -66,75 +66,31 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                         repo.setSelectedDeviceId(null)
                         return@collect
                     }
-                    val command = Action.GET_PROTOCOL_INFO
-                    val controlUrl = device.controlUrls[command.service] ?: run {
-                        Log.e("DlnaController", "Service not supported by device")
-                        repo.setSelectedDeviceId(null)
-                        return@collect
-                    }
-                    val serviceUrn = device.serviceUrns[command.service] ?: run {
-                        Log.e("DlnaController", "Service not supported by device")
-                        repo.setSelectedDeviceId(null)
-                        return@collect
-                    }
-                    val fullUrl = resolveUrl(device, controlUrl)
-                    val payload = upnpService.upnpMessages.draftDlnaMessage(command.actionName, serviceUrn, mapOf(), device.mediaCollection)
-                    val request = Request.Builder()
-                        .url(fullUrl)
-                        .post(payload.toRequestBody("text/xml; charset=utf-8".toMediaType()))
-                        .addHeader("SOAPACTION", "\"$serviceUrn#${command.actionName}\"")
-                        .build()
-                    client.newCall(request).execute().use { response ->
-                        val responseBody = response.body.string()
-                        Log.d("DlnaController", "SOAP command ${command.actionName} response: code=${response.code}")
-                        if (response.isSuccessful && responseBody.isNotEmpty()) {
-                            val expectedResponse = command.responseName
-                            if (expectedResponse.isNotEmpty() && upnpService.upnpMessages.parseUpnpHttpRequest(responseBody) == expectedResponse
-                            ) {
-                                val responseData = upnpService.upnpMessages.parseDlnaResponse(responseBody)
-                                if (responseData.isNotEmpty()) {
-                                    val deviceMediaCollection = UpnpRepository.kinoService.sharedMediaCollection.value.toMutableMap()
-                                    val sinkData = responseData["Sink"] ?: ""
-                                    if (sinkData.isBlank()) {
-                                        device.setMediaCollection(deviceMediaCollection)
-                                        return@collect
-                                    }
-                                    var sinkEntries = sinkData.split(",").mapNotNull { raw ->
-                                        val parts = raw.split(":", limit = 4)
-                                        if (parts.size == 4) {
-                                            mapOf("protocol" to parts[0],
-                                                  "network" to parts[1],
-                                                  "contentFormat" to parts[2].substringBefore(";"),
-                                                  "dlnaProfile" to parts[3].split(";")
-                                                      .firstOrNull { it.startsWith("DLNA.ORG_PN=") }
-                                                      ?.substringAfter("DLNA.ORG_PN="))
-                                        } else {
-                                            null
-                                        }
-                                    }
-                                    device.setMediaCollection(deviceMediaCollection)
-                                    return@collect
-                                } else {
-                                    Log.w("upnpkino", "SOAP command ${command.actionName} failed: dlna response is empty: $responseData")
-                                }
-                            } else {
-                                Log.w("upnpkino", "SOAP command ${command.actionName} failed: not the expected response: $expectedResponse")
-                            }
-                        } else {
-                            Log.w("upnpkino", "SOAP command ${command.actionName} failed: code=${response.code} body=$responseBody")
-                        }
-                        repo.setSelectedDeviceId(null)
+                    val deviceMediaCollection = UpnpRepository.kinoService.sharedMediaCollection.value.toMutableMap()
+                    device.setMediaCollection(deviceMediaCollection) // TODO filter out media files which cannot be played natively or transcoded
+                }
+            }
+        }
+        scope.launch {
+            repo.selectedMediaFileId.collect { selectedMediaFileId ->
+                if (selectedMediaFileId != null) {
+                    val selectedDeviceId = repo.selectedDeviceId.value
+                    val selectedDevice = repo.devices.value?.get(selectedDeviceId) ?: return@collect
+                    val mediaFile = selectedDevice.mediaCollection[selectedMediaFileId]
+                    if (mediaFile is MediaCollection.MediaNode.Item) {
+                        val caps = upnpService.transcoderController.capabilities
+                        val transcodeTarget = resolveTranscodeTarget(
+                            sourceItem = mediaFile,
+                            device = selectedDevice,
+                            canEncodeVideo = { codec: Constants.Transcoder.VideoCodec -> caps?.verifiedVideo?.get(codec)?.isNotEmpty() == true },
+                            canEncodeVideoAtRes = { codec: Constants.Transcoder.VideoCodec, res: Constants.Transcoder.Resolution -> caps?.canEncode(codec, res) == true },
+                            canEncodeAudio = { codec: Constants.Transcoder.AudioCodec -> caps?.canEncodeAudio(codec) == true }
+                        )
+                        Log.d("DlnaController", "Resolved transcode target for ${mediaFile.name}: $transcodeTarget")
                     }
                 }
             }
         }
-
-
-
-
-
-
-        
         scope.launch {
             repo.streamingFlag.collect { streamingFlag ->
                 if (streamingFlag != null) {
@@ -250,6 +206,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             }
         }
     }
+
     private suspend fun subscribeToDeviceEvents(dlnaDevice: DlnaNodeModel) {
         Log.d("DlnaController", "Subscribing to device events: ${dlnaDevice.friendlyName}")
         subscriptionMutex.withLock {
@@ -523,11 +480,46 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                             deviceDescription.controlUrls,
                             deviceDescription.eventUrls
                         )
-                        dlnaDevices[id] = device
-                        withContext(Dispatchers.Main) {
-                            repo.setDevices(dlnaDevices.toMap())
+                        val command = Action.GET_PROTOCOL_INFO
+                        val controlUrl = device.controlUrls[command.service] ?: run {
+                            Log.e("DlnaController", "Service not supported by device")
+                            repo.setSelectedDeviceId(null)
+                            return@let
                         }
-                        Log.d("DlnaController", "Registered $location")
+                        val serviceUrn = device.serviceUrns[command.service] ?: run {
+                            Log.e("DlnaController", "Service not supported by device")
+                            repo.setSelectedDeviceId(null)
+                            return@let
+                        }
+                        val fullUrl = resolveUrl(device, controlUrl)
+                        val payload = upnpService.upnpMessages.draftDlnaMessage(command.actionName, serviceUrn, mapOf(), device.mediaCollection)
+                        val request = Request.Builder()
+                            .url(fullUrl)
+                            .post(payload.toRequestBody("text/xml; charset=utf-8".toMediaType()))
+                            .addHeader("SOAPACTION", "\"$serviceUrn#${command.actionName}\"")
+                            .build()
+                        client.newCall(request).execute().use { response ->
+                            val responseBody = response.body.string()
+                            Log.d("DlnaController", "SOAP command ${command.actionName} response: code=${response.code}")
+                            if (response.isSuccessful && responseBody.isNotEmpty()) {
+                                val expectedResponse = command.responseName
+                                if (expectedResponse.isNotEmpty() && upnpService.upnpMessages.parseUpnpHttpRequest(responseBody) == expectedResponse) {
+                                    val responseData = upnpService.upnpMessages.parseDlnaResponse(responseBody)
+                                    if (responseData.isNotEmpty()) {
+                                        val sinkData = responseData["Sink"] ?: ""
+                                        if (sinkData.isBlank()) {
+                                            return@let
+                                        }
+                                        device.fromProtocolInfo(sinkData)
+                                        dlnaDevices[id] = device
+                                        withContext(Dispatchers.Main) {
+                                            repo.setDevices(dlnaDevices.toMap())
+                                        }
+                                        Log.d("DlnaController", "Registered $location")
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             } finally {
@@ -607,4 +599,80 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         repo.setSeekBarPosition("00:00:00")
         repo.setLoadingState(false)
     }
+
+    /**
+     * Resolves the optimal TranscodeProfile using a 5-step dimensional evaluation.
+     */
+    fun resolveTranscodeTarget(
+        sourceItem: MediaCollection.MediaNode.Item,
+        device: DlnaNodeModel,
+        canEncodeVideo: (Constants.Transcoder.VideoCodec) -> Boolean,
+        canEncodeVideoAtRes: (Constants.Transcoder.VideoCodec, Constants.Transcoder.Resolution) -> Boolean,
+        canEncodeAudio: (Constants.Transcoder.AudioCodec) -> Boolean
+    ): Constants.Transcoder.TranscodeProfile? {
+        val sink = device.sinkCapabilities
+        val sourceVideoCodec = sourceItem.videoTracks.firstOrNull()?.codec
+        val sourceAudioCodec = sourceItem.audioTracks.firstOrNull()?.codec
+        val sourceHeight = sourceItem.videoTracks.firstOrNull()?.resolution
+            ?.split("x")?.getOrNull(1)?.toIntOrNull() ?: 1080
+        val sourceTier = Constants.Transcoder.Priority.RESOLUTIONS.sortedBy { it.maxHeight }.find { it.maxHeight >= sourceHeight } ?: Constants.Transcoder.Resolution.HD_1080
+        val sourceChannels = sourceItem.audioTracks.firstOrNull()?.channelCount ?: 2
+        val sourceAudioQuality = Constants.Transcoder.Priority.AUDIO_QUALITIES.find { it.channelCount <= sourceChannels } ?: Constants.Transcoder.AudioQuality.STEREO
+        val sourceExt = sourceItem.name.substringAfterLast('.', "").lowercase()
+        val sourceContainer = when {
+            sourceExt in setOf("mkv") -> Constants.Transcoder.Container.MKV
+            sourceExt in setOf("ts", "mts") -> Constants.Transcoder.Container.MPEG_TS
+            else -> Constants.Transcoder.Container.MP4
+        }
+
+        // Prefer Native / Minimum Effort: If sink accepts wildcard '*' or supports native source profile directly
+        if (sink.isWildcard || (
+            sourceVideoCodec != null && sink.supportsVideoCodec(sourceVideoCodec) &&
+            sink.supportsResolution(sourceTier) &&
+            sourceAudioCodec != null && sink.supportsAudioCodec(sourceAudioCodec) &&
+            sink.supportsChannelCount(sourceAudioQuality.channelCount) &&
+            sink.supportsContainer(sourceContainer)
+        )) {
+            return Constants.Transcoder.TranscodeProfile(
+                videoCodec = sourceVideoCodec ?: Constants.Transcoder.VideoCodec.H264,
+                resolution = sourceTier,
+                audioCodec = sourceAudioCodec ?: Constants.Transcoder.AudioCodec.AAC,
+                audioQuality = sourceAudioQuality,
+                container = sourceContainer
+            )
+        }
+
+        // Downward-only evaluation: Candidates start strictly at source tier & channel count and only go downwards
+        val candidateResolutions = Constants.Transcoder.Priority.RESOLUTIONS.filter { it.maxHeight <= sourceTier.maxHeight }
+        val candidateAudioQualities = Constants.Transcoder.Priority.AUDIO_QUALITIES.filter { it.channelCount <= sourceChannels }
+
+        for (videoCodec in Constants.Transcoder.Priority.VIDEO_CODECS) {
+            if (!canEncodeVideo(videoCodec)) continue
+
+            for (resolution in candidateResolutions) {
+                if (!canEncodeVideoAtRes(videoCodec, resolution)) continue
+
+                for (audioCodec in Constants.Transcoder.Priority.AUDIO_CODECS) {
+                    if (!canEncodeAudio(audioCodec)) continue
+
+                    for (audioQuality in candidateAudioQualities) {
+
+                        for (container in Constants.Transcoder.Priority.CONTAINERS) {
+                            if (sink.supportsCombination(videoCodec, resolution, audioCodec, audioQuality, container)) {
+                                return Constants.Transcoder.TranscodeProfile(
+                                    videoCodec = videoCodec,
+                                    resolution = resolution,
+                                    audioCodec = audioCodec,
+                                    audioQuality = audioQuality,
+                                    container = container
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return null
+    }
+
 }

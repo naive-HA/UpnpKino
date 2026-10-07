@@ -362,8 +362,7 @@ class DlnaActivity : AppCompatActivity() {
                     if(repo.selectedDeviceId.value == null) return@collect
                     if (selectedMediaFileId != null) {
                         val selectedDeviceId = repo.selectedDeviceId.value
-                        val selectedDevice =
-                            repo.devices.value?.get(selectedDeviceId) ?: return@collect
+                        val selectedDevice = repo.devices.value?.get(selectedDeviceId) ?: return@collect
                         val mediaFile = selectedDevice.mediaCollection[selectedMediaFileId]
                         binding.mediaFile.isEnabled = true
                         binding.mediaFile.text = mediaFile?.name

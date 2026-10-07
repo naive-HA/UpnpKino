@@ -173,6 +173,29 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
          *  of a six-place decimal (so the wanted one never is dropped). */
         private const val AUDIO_SLICE_SEEK_EPSILON_S = 0.000002
 
+        /** Whether the audio keeps its encoder's priming packet.
+         *
+         *  An AAC encoder emits one leading packet that carries no audio of
+         *  its own: it is the overlap partner of the first real packet (AAC is
+         *  a lapped transform, and a block is only reconstructed from two
+         *  consecutive packets). The mp4 way of hiding it is an edit list on
+         *  the audio track that starts playback one priming-length into the
+         *  media, so the packet sits at negative time and a player skips it.
+         *
+         *  True keeps the packet and carries that declaration through the mux
+         *  ([remuxVideoAndAudio], [concatChunksFragmented]), so nothing in the
+         *  timeline moves -- video is exactly where the source puts it -- and
+         *  the first real block decodes exactly as it does in the single encode
+         *  (measured: with the packet dropped instead, that first 21ms block
+         *  came out around -3dB against the signal on a loud start, effectively
+         *  a different sound). The cost is borne only by a player that ignores
+         *  edit lists: it would play the priming block and run its audio 21ms
+         *  late.
+         *
+         *  False drops the packet when slicing: no declaration needed anywhere,
+         *  at the price of that damaged block. */
+        private const val AUDIO_KEEP_PRIMING = true
+
         /** How far the assembled file's duration may sit from the requested
          *  total before [verifyAssembledDuration] warns (it never fails on this
          *  -- see its own thresholds). Simulating the full pipeline on real
@@ -962,7 +985,6 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             } else {
                 Log.e(TAG, "UNIFIED TEST: '${item.name}' (${item.durationMs}ms) -> FAILED in ${wallElapsed}ms")
             }
-            break
             delay(1000.milliseconds)
         }
         val uncoveredLayouts = AudioChannelLayout.entries.toSet() - exercisedAudioLayouts
@@ -1382,7 +1404,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         timeoutMs: Long = HW_PROBE_TIMEOUT_MS,
         verbosity: String = "error"
     ): HwProbeOutcome {
-//        return HwProbeOutcome.FAIL
+        return HwProbeOutcome.FAIL
         if (stdinSource == null && !File(inputPath).exists()) return HwProbeOutcome.FAIL
 
         // Costs one extra full pass over the source ahead of the real probe
@@ -1672,6 +1694,9 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                                 }
                                 out.flush()
                                 Log.d(TAG, "transcodeMediaFile: streamed chunk $index/${chunkBoundaries.size} for '${item.name}' [${chunkStartMs}ms +${chunkDurMs}ms)")
+                                if (index > 0) {
+                                    Log.i(TAG, "SEAM #$index/${chunkBoundaries.size - 1} (stream) '${item.name}' at ${formatTimestamp(chunkStartMs - firstStartMs)} into this stream (src ${formatTimestamp(chunkStartMs)})")
+                                }
                             }
                         } finally {
                             audioLeg?.cancel()
@@ -1807,9 +1832,17 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * one, so N independent per-chunk encodes carry N of each: every seam
      * either 21ms off, or -- with the priming trimmed away -- decoded without
      * the overlap partner it needs. One encode has one of each, and slices of
-     * it are one continuous stream cut into pieces. Where a slice belongs in
-     * the finished timeline is exact, and is the caller's to apply: see
-     * [audioFirstTickFor] and [patchFragmentTimestamps].
+     * it are one continuous stream cut into pieces. The one priming packet
+     * stays: the first chunk's slice opens with it, and the edit list the mux
+     * writes for it ([remuxVideoAndAudio]) tells a player to skip it, so
+     * nothing is shifted to hide it and the first real block decodes exactly
+     * as in the single encode ([AUDIO_KEEP_PRIMING]). Where each later slice
+     * belongs in the finished timeline is exact, and is the caller's to
+     * apply: see [audioFirstTickFor] and [patchFragmentTimestamps].
+     *
+     * The video decides the timeline, never the audio: chunks sit where
+     * their video keyframes are, each audio window is cut to its video
+     * chunk's boundaries, and the duration checks read the video track.
      *
      * [offsetMs]/[limitDurationMs] are this chunk's own window, the same one
      * the video leg was given, so the two legs cannot disagree about what
@@ -1855,6 +1888,17 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             val videoLimitSeconds = limitDurationMs?.let { (it - halfFrameMs(frameRate)) / 1000.0 }
             val muxOk = remuxVideoAndAudio(videoOnlyFile, window, outputFile, fragmented = fragmented, videoLimitSeconds = videoLimitSeconds)
             if (!muxOk || !outputFile.exists() || outputFile.length() == 0L) return ChunkOutcome.Failed
+            if (window?.keepsPriming == true) {
+                // The edit list is what turns "the packet is in the file" into "a
+                // player skips it". Read it back rather than trust the muxer to
+                // have written it: without it the audio plays one packet late.
+                val declared = readAudioEditListStartTicks(outputFile)
+                if (declared == null || declared <= 0L) {
+                    Log.w(TAG, "addAudioAndMux: '${item.name}' -- the first chunk carries the audio's priming packet but its edit list does not declare it (media_time=$declared); a player will play that packet and the audio will run about one packet late")
+                } else {
+                    Log.d(TAG, "addAudioAndMux: '${item.name}' -- priming declared in the first chunk's edit list (media_time=$declared ticks)")
+                }
+            }
             return if (window == null || verifyMuxedAvSync(outputFile, item.name)) ChunkOutcome.Success else ChunkOutcome.Failed
         } finally {
             videoOnlyFile.delete()
@@ -1871,15 +1915,23 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * of it read from the file itself rather than assumed per codec.
      *
      * [primingTicks] is the encoder delay the file *declares* in its edit
-     * list (0 when it declares none). It matters because everything here
-     * addresses the audio in presentation time, the way a player would: raw
-     * packet j is presented at `j * packetTicks - primingTicks`, so with a
-     * declared priming of one packet the encoder's priming packet sits at
-     * -1 packet and the first real one at 0, and a 1024-sample AAC frame, a
-     * 1536-sample AC-3 frame and an encoder whose delay is not a whole
-     * packet are all the same arithmetic.
+     * list (0 when it declares none). Slicing is done in presentation time,
+     * the way a player sees the file: raw packet j is presented at
+     * `j * packetTicks - primingTicks`, so with a declared priming of one
+     * packet the priming packet sits at -1 packet and the first real one at
+     * 0, and a 1024-sample AAC frame, a 1536-sample AC-3 frame and an
+     * encoder whose delay is not a whole packet are all the same arithmetic.
      */
-    private data class AudioLayout(val timescale: Int, val packetTicks: Long, val primingTicks: Long)
+    private data class AudioLayout(val timescale: Int, val packetTicks: Long, val primingTicks: Long) {
+        /** True when the output keeps the priming packet ([AUDIO_KEEP_PRIMING]) and so has to declare it. */
+        val keepsPriming: Boolean get() = AUDIO_KEEP_PRIMING && primingTicks > 0L
+        /** How far in front of presentation time zero the output's audio track
+         *  runs: all of the priming, or none of it. It is the difference between
+         *  a packet's presentation time and its place on the track's own
+         *  timeline, which is where fragments are positioned. Only the audio
+         *  track has it -- the video is never offset. */
+        val keptPrimingTicks: Long get() = if (keepsPriming) primingTicks else 0L
+    }
 
     /** How much of the audio encode a reader may use, republished through
      *  [AudioLeg.progress] each time it grows. */
@@ -1940,9 +1992,15 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         val seekSeconds: Double?,
         /** Input `-t`, null for a window that runs to the end of the audio. */
         val durationSeconds: Double?,
-        /** Presentation time of the slice's first packet, in the audio
-         *  track's own ticks -- where it belongs in the finished timeline. */
+        /** Where the slice's first packet belongs on the finished audio
+         *  track's own timeline, in its ticks: its presentation time plus
+         *  whatever priming the track carries ahead of time zero. */
         val firstTick: Long,
+        /** True when the slice deliberately begins with the encoder's priming
+         *  packet (the window that opens the range, when the priming is kept):
+         *  the mux must then neither cut strictly at the start nor shift to
+         *  make that packet's negative time zero -- see [remuxVideoAndAudio]. */
+        val keepsPriming: Boolean,
         /** True for a snapshot: the user of the window deletes it. */
         val temporary: Boolean
     )
@@ -1952,7 +2010,8 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         val firstTick: Long,
         val seekSeconds: Double?,
         val durationSeconds: Double?,
-        val neededPackets: Long
+        val neededPackets: Long,
+        val keepsPriming: Boolean
     )
 
     private fun audioLegRawFile(item: MediaCollection.MediaNode.Item, sessionId: String): File =
@@ -2150,20 +2209,8 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         val edts = findTopLevelBox(raf, trak.first + 8, trak.second, "edts")
         val elst = edts?.let { findTopLevelBox(raf, it.first + 8, it.second, "elst") }
         if (elst != null) {
-            raf.seek(elst.first + 8)
-            val version = raf.readByte().toInt()
-            raf.seek(elst.first + 12)
-            val entryCount = raf.readIntBE()
-            if (entryCount > 0) {
-                // entries start at +16: segment_duration, then media_time
-                // (4 bytes each in version 0, 8 in version 1).
-                val mediaTime = if (version == 1) {
-                    raf.seek(elst.first + 16 + 8); raf.readLongBE()
-                } else {
-                    raf.seek(elst.first + 16 + 4); raf.readIntBE().toLong()
-                }
-                if (mediaTime > 0L) primingTicks = mediaTime
-            }
+            val mediaTime = readFirstEditMediaTime(raf, elst.first)
+            if (mediaTime != null && mediaTime > 0L) primingTicks = mediaTime
         }
 
         var packetTicks = readFragmentSamples(raf, firstMoofPos, firstMoofSize).second
@@ -2235,36 +2282,49 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * [AudioWindowPlan.firstTick] after the fact ([audioFirstTickFor])
      * instead of having it threaded back through the chunk pipeline.
      *
-     * A packet belongs to the window if it *starts* inside it. Raw packet j
-     * starts at `j * packetTicks - primingTicks` (presentation time), so the
-     * first one is the smallest j with that >= the window's start, and the
-     * window ends before the first j that reaches its end. Consecutive
-     * windows therefore partition the packets exactly: each packet is in
-     * one chunk, none twice, none dropped -- whatever the chunk boundaries,
-     * which fall wherever the video keyframes do and are not multiples of
-     * a packet. The slice starts up to one packet *after* its chunk's start;
-     * that is not a gap, because [firstTick] puts it where it really is.
+     * The window is the video chunk's own: the audio is cut to the video's
+     * boundaries, not the other way round. A packet belongs to the window if
+     * it *starts* inside it. Raw packet j starts at
+     * `j * packetTicks - primingTicks` (presentation time), so the first one
+     * is the smallest j with that >= the window's start, and the window ends
+     * before the first j that reaches its end. Consecutive windows therefore
+     * partition the packets exactly: each packet is in one chunk, none
+     * twice, none dropped -- whatever the chunk boundaries, which fall
+     * wherever the video keyframes do and are not multiples of a packet. The
+     * slice starts up to one packet *after* its chunk's start; that is not a
+     * gap, because [AudioWindowPlan.firstTick] puts it where it really is.
      *
-     * The seek lands [AUDIO_SLICE_SEEK_EPSILON_S] before that packet (see
-     * the constant for why), and the duration is cut half a packet short of
-     * the end, midway between two packet starts, where rounding can't
-     * matter. [AudioWindowPlan.neededPackets] is one more than the last
-     * packet the window takes: ffmpeg decides a window is over by seeing the
-     * first packet past it, so that one must exist and be complete too.
+     * The one exception is the window that opens the range when the priming
+     * is kept ([AudioLayout.keepsPriming]): it also takes the packet(s)
+     * before presentation time zero, i.e. the priming itself, which is what
+     * makes the audio's first real block reconstructable. That slice then
+     * has no seek -- it starts at the start of the file -- and its `-t` is
+     * counted from presentation zero.
+     *
+     * Otherwise the seek lands [AUDIO_SLICE_SEEK_EPSILON_S] before the first
+     * packet (see the constant for why), and the duration is cut half a
+     * packet short of the end, midway between two packet starts, where
+     * rounding can't matter. [AudioWindowPlan.neededPackets] is one more than
+     * the last packet the window takes: ffmpeg decides a window is over by
+     * seeing the first packet past it, so that one must exist and be
+     * complete too.
      */
     private fun planAudioWindow(layout: AudioLayout, startOffsetMs: Long, durationMs: Long?): AudioWindowPlan {
         val ts = layout.timescale.toLong()
         val pk = layout.packetTicks
         val priming = layout.primingTicks
         fun firstPacketAtOrAfter(ms: Long): Long = ceilDiv(ms * ts + priming * 1000L, pk * 1000L)
-        val first = firstPacketAtOrAfter(startOffsetMs)
-        val firstTick = first * pk - priming
-        val seek = (firstTick.toDouble() / ts - AUDIO_SLICE_SEEK_EPSILON_S).takeIf { it > 0.0 }
+        val keepsPriming = layout.keepsPriming && startOffsetMs <= 0L
+        val first = if (keepsPriming) 0L else firstPacketAtOrAfter(startOffsetMs)
+        val presentationTick = first * pk - priming // negative for the priming packet
+        val firstTick = presentationTick + layout.keptPrimingTicks
+        val seek = (presentationTick.toDouble() / ts - AUDIO_SLICE_SEEK_EPSILON_S).takeIf { it > 0.0 }
         // Open-ended: no `-t`, and no packet count to wait for -- only the end of the encode.
-        if (durationMs == null) return AudioWindowPlan(firstTick, seek, null, Long.MAX_VALUE)
+        if (durationMs == null) return AudioWindowPlan(firstTick, seek, null, Long.MAX_VALUE, keepsPriming)
         val end = firstPacketAtOrAfter(startOffsetMs + durationMs)
-        val count = maxOf(end - first, 1L)
-        return AudioWindowPlan(firstTick, seek, (count - 0.5) * pk / ts, end + 1)
+        // `-t` is counted from the seek point, or from presentation zero when there is none.
+        val duration = (((end - 0.5) * pk - priming) / ts - (seek ?: 0.0)).coerceAtLeast(0.5 * pk / ts)
+        return AudioWindowPlan(firstTick, seek, duration, end + 1, keepsPriming)
     }
 
     /**
@@ -2320,7 +2380,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             temporary = true
         }
         Log.d(TAG, "awaitAudioWindow: '$itemName' [${startOffsetMs}ms +${durationMs}ms) -- waited ${waitedMs}ms, ${if (temporary) "snapshot of the first ${readFile.length()} bytes" else "finished file"}, first packet at tick ${plan.firstTick}/${layout.timescale}")
-        return AudioWindow(readFile, plan.seekSeconds, plan.durationSeconds, plan.firstTick, temporary)
+        return AudioWindow(readFile, plan.seekSeconds, plan.durationSeconds, plan.firstTick, plan.keepsPriming, temporary)
     }
 
     /** Copies the first [length] bytes of [source] to [target]. */
@@ -2377,7 +2437,10 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * ([audioFirstTick], exact on the packet grid), which is up to a packet
      * after the video: placing both by the same millisecond figure instead
      * would nudge every audio seam off the grid by up to 21ms, each time a
-     * different amount.
+     * different amount. [audioFirstTick] is on the audio track's own
+     * timeline -- including the priming it carries ahead of time zero when
+     * that is kept ([AudioLayout.keptPrimingTicks]), which chunk 0's edit
+     * list accounts for. The video is never offset.
      *
      * Both assume the chunk's own fragments start at tfdt 0 -- true of the
      * muxed chunks this file produces, and logged per chunk
@@ -2591,11 +2654,15 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                         // so no decode: cheap.
                         val vPts = probeStreamFramePtsMsSorted(chunkFile, "v:0")
                         val aPts = if (audioLeg != null) probeStreamFramePtsMsSorted(chunkFile, "a:0") else null
-                        val avStartOffsetMs: Long? = if (vPts != null && aPts != null) aPts.first() - vPts.first() else null
+                        // The first chunk's audio opens with the priming packet, at negative
+                        // time and hidden by its edit list; what matters for alignment is
+                        // where the first packet a viewer actually hears starts.
+                        val aAudibleFirst = aPts?.firstOrNull { it >= 0L }
+                        val avStartOffsetMs: Long? = if (vPts != null && aAudibleFirst != null) aAudibleFirst - vPts.first() else null
                         Log.d(TAG, "Chunked transcode: '${item.name}' chunk $i A/V packet check -- " +
                             "video first=${vPts?.firstOrNull()}ms last=${vPts?.lastOrNull()}ms n=${vPts?.size}; " +
-                            "audio first=${aPts?.firstOrNull()}ms last=${aPts?.lastOrNull()}ms n=${aPts?.size}; " +
-                            "start offset (audio minus video)=${avStartOffsetMs}ms")
+                            "audio first=${aPts?.firstOrNull()}ms (first audible=${aAudibleFirst}ms) last=${aPts?.lastOrNull()}ms n=${aPts?.size}; " +
+                            "start offset (first audible audio minus video)=${avStartOffsetMs}ms")
                         if (avStartOffsetMs != null && Math.abs(avStartOffsetMs) > 5) {
                             Log.w(TAG, "Chunked transcode: '${item.name}' chunk $i -- audio and video start ${avStartOffsetMs}ms apart (audio minus video) within the chunk itself; that offset is carried into every seam of the assembled file")
                         }
@@ -2603,7 +2670,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
 
                     val chunkStartOffsetsMs = chunkBoundaries.map { it.startMs - firstStartMs }
                     val concatOk = concatChunksFragmented(
-                        chunkFiles, chunkStartOffsetsMs, chunkAudioFirstTicks, audioLeg?.progress?.value?.layout?.timescale,
+                        chunkFiles, chunkStartOffsetsMs, chunkAudioFirstTicks, audioLeg?.progress?.value?.layout,
                         chunkNominalDurationsMs, chunkVideoDurationsMs, finalOutputFile, item.name
                     )
                     val durationOk = concatOk && verifyAssembledDuration(finalOutputFile, totalDurationMs, item.name)
@@ -2615,6 +2682,20 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                     // transcode, hence the loose bound.
                     val avOk = durationOk && (audioLeg == null || verifyMuxedAvSync(finalOutputFile, item.name, toleranceMs = FINAL_CHUNK_TOLERANCE_MS))
                     if (concatOk) {
+                        // Where the seams are, as timestamps to jump to when assessing the
+                        // output by eye and ear. Instant, so it comes before the scan below.
+                        val seamLayout = audioLeg?.progress?.value?.layout
+                        logSeamMap(
+                            item.name, firstStartMs, chunkStartOffsetsMs.drop(1),
+                            videoGapsMs = (1 until numChunks).map { n ->
+                                chunkStartOffsetsMs[n] - (chunkStartOffsetsMs[n - 1] + chunkVideoDurationsMs[n - 1])
+                            },
+                            audioAfterSeamMs = (1 until numChunks).map { n ->
+                                val tick = chunkAudioFirstTicks[n]
+                                if (tick == null || seamLayout == null) null
+                                else (tick - seamLayout.keptPrimingTicks) * 1000.0 / seamLayout.timescale - chunkStartOffsetsMs[n]
+                            }
+                        )
                         // CHECK -- the definitive per-seam one: reads the assembled
                         // file's own packet timestamps in a window around every
                         // internal chunk boundary and reports each gap or overlap
@@ -2733,7 +2814,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         chunkFiles: List<File>,
         chunkStartOffsetsMs: List<Long>,
         chunkAudioFirstTicks: List<Long?>,
-        audioTimescale: Int?,
+        audioLayout: AudioLayout?,
         chunkNominalDurationsMs: List<Long>,
         chunkVideoDurationsMs: List<Long>,
         outputFile: File,
@@ -2756,12 +2837,17 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             // Pass 1: wrap each chunk as a fragmented mp4.
             for ((index, chunkFile) in chunkFiles.withIndex()) {
                 val fragmented = File(durableWorkDir, "frag_${chunkFile.nameWithoutExtension}.mp4")
-                val args = listOf(
-                    ffmpegPath, "-y", "-hide_banner", "-v", "warning",
-                    "-i", chunkFile.absolutePath,
-                    "-c", "copy", "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                // Chunk 0 is the one whose audio opens with the priming packet and
+                // the edit list that hides it, and its moov is the one the whole
+                // file inherits: this re-wrap has to hand both on, which needs the
+                // same two things as the mux that made them (see remuxVideoAndAudio).
+                val keepsPriming = index == 0 && audioLayout?.keepsPriming == true
+                val args = mutableListOf(ffmpegPath, "-y", "-hide_banner", "-v", "warning", "-i", chunkFile.absolutePath, "-c", "copy")
+                if (keepsPriming) args.addAll(listOf("-avoid_negative_ts", "disabled"))
+                args.addAll(listOf(
+                    "-movflags", "frag_keyframe+${if (keepsPriming) "delay_moov" else "empty_moov"}+default_base_moof",
                     "-f", "mp4", fragmented.absolutePath
-                )
+                ))
                 val result = runProcessCapture(args, timeoutMs = Budget.forStreamCopy(chunkFile.length()))
                 if (!result.succeededWriting(fragmented)) {
                     Log.e(TAG, "concatChunksFragmented: '$itemName' -- failed to fragment chunk $index (exitCode=${result.exitCode}): ${result.stderr}")
@@ -2772,6 +2858,17 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                 // becoming spliceable.
                 Log.d(TAG, "concatChunksFragmented: '$itemName' chunk $index fragmented OK (${chunkFile.length()} -> ${fragmented.length()} bytes)")
                 fragmentedFiles.add(fragmented)
+            }
+
+            if (audioLayout?.keepsPriming == true) {
+                // Confirm chunk 0's re-wrap kept the declaration: it is what lets
+                // players skip the priming packet in the finished file.
+                val declared = readAudioEditListStartTicks(fragmentedFiles.first())
+                if (declared == null || declared <= 0L) {
+                    Log.w(TAG, "concatChunksFragmented: '$itemName' -- chunk 0's re-wrap lost the audio's priming declaration (media_time=$declared); the assembled file's audio will play about one packet late")
+                } else {
+                    Log.d(TAG, "concatChunksFragmented: '$itemName' chunk 0 keeps the priming declaration through the re-wrap (media_time=$declared ticks)")
+                }
             }
 
             // readTrackTimescales only needs to run once: "same item, same
@@ -2785,20 +2882,20 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                 return false
             }
             val audioTrackId = readAudioTrackId(fragmentedFiles.first())
-            if (audioTimescale != null && audioTrackId == null) {
+            if (audioLayout != null && audioTrackId == null) {
                 Log.e(TAG, "concatChunksFragmented: '$itemName' -- the audio leg exists but chunk 0 has no audio track; refusing to splice a video-only file")
                 return false
             }
             // CHECK -- confirms both tracks (video, audio) were actually
             // found before splicing 80-odd fragments against whatever was.
-            Log.d(TAG, "concatChunksFragmented: '$itemName' track timescales read from chunk 0: $trackTimescales (audio track id=$audioTrackId, audio leg timescale=$audioTimescale)")
+            Log.d(TAG, "concatChunksFragmented: '$itemName' track timescales read from chunk 0: $trackTimescales (audio track id=$audioTrackId, audio leg timescale=${audioLayout?.timescale})")
 
             // Pass 2: splice, patching every chunk after the first to its
             // real position.
             RandomAccessFile(splicedFile, "rw").use { out ->
                 for ((index, fragFile) in fragmentedFiles.withIndex()) {
                     val placement: Map<Int, Long> = if (index > 0) {
-                        chunkPlacementTicks(trackTimescales, audioTrackId, audioTimescale, chunkStartOffsetsMs[index], chunkAudioFirstTicks[index])
+                        chunkPlacementTicks(trackTimescales, audioTrackId, audioLayout?.timescale, chunkStartOffsetsMs[index], chunkAudioFirstTicks[index])
                     } else emptyMap()
                     // CHECK -- read each track's first tfdt back from the file
                     // itself, before and after patching. patchFragmentTimestamps
@@ -2880,6 +2977,14 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             val result = runProcessCapture(args, timeoutMs = timeoutMs)
             val ok = result.succeededWriting(outputFile)
             Log.d(TAG, "concatChunksFragmented: '$itemName' final remux ${if (ok) "OK" else "FAILED"} (exitCode=${result.exitCode}, budget=${timeoutMs}ms, size=${outputFile.length()})")
+            if (ok && audioLayout?.keepsPriming == true) {
+                val declared = readAudioEditListStartTicks(outputFile)
+                if (declared == null || declared <= 0L) {
+                    Log.w(TAG, "concatChunksFragmented: '$itemName' -- the FINAL file's audio has no priming declaration (media_time=$declared): players will play the priming packet and the audio will run about one packet late")
+                } else {
+                    Log.d(TAG, "concatChunksFragmented: '$itemName' final file declares the audio priming (media_time=$declared ticks) -- video untouched")
+                }
+            }
             if (!ok) Log.e(TAG, "concatChunksFragmented: '$itemName' remux stderr: ${result.stderr}")
             return ok
         } catch (e: Exception) {
@@ -2889,6 +2994,68 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             fragmentedFiles.forEach { it.delete() }
             splicedFile.delete()
         }
+    }
+
+    /** `h:mm:ss.mmm` -- the form a player's seek bar shows, so a logged
+     *  timestamp can be typed straight into one. */
+    private fun formatTimestamp(ms: Long): String {
+        val sign = if (ms < 0) "-" else ""
+        val a = Math.abs(ms)
+        return String.format(Locale.US, "%s%d:%02d:%02d.%03d", sign, a / 3_600_000, (a / 60_000) % 60, (a / 1000) % 60, a % 1000)
+    }
+
+    /**
+     * Logs where every internal seam of an assembled file is, as timestamps
+     * of the output -- the chunk boundaries, where one chunk's video ends and
+     * the next begins -- so the result can be assessed in real life: open the
+     * file, jump to each, and look and listen across it. One line per seam
+     * (grep `SEAM`), then a summary naming the ones worth the trouble.
+     *
+     * What each line says besides where the seam is:
+     *  - the video gap: how far the next chunk's first frame sits from where
+     *    the previous chunk's last frame ends. Positive means the previous
+     *    chunk's video came up short and its last frame is held for that long
+     *    (a pause on screen); negative an overlap. Under about two frames is
+     *    ordinary quantisation and not flagged.
+     *  - how long after the seam the first audio packet of the new chunk's
+     *    slice starts: always under one packet, and not a defect -- the audio
+     *    is one continuous stream, with no seam of its own, and its packets
+     *    tile straight through. It is there so a click at a seam can be told
+     *    apart from a timing offset.
+     *
+     * The output timeline is the source's (video is never shifted), so
+     * `at` is also where the same moment sits in the source, less the range's
+     * start (`src` adds it back).
+     */
+    private fun logSeamMap(
+        itemName: String,
+        rangeStartMs: Long,
+        seamOffsetsMs: List<Long>,
+        videoGapsMs: List<Long>,
+        audioAfterSeamMs: List<Double?>
+    ) {
+        if (seamOffsetsMs.isEmpty()) {
+            Log.i(TAG, "SEAM MAP '$itemName': a single chunk, no internal seams")
+            return
+        }
+        val flagged = ArrayList<String>()
+        for ((n, offsetMs) in seamOffsetsMs.withIndex()) {
+            val gapMs = videoGapsMs.getOrNull(n)
+            val audioMs = audioAfterSeamMs.getOrNull(n)
+            val verdict = when {
+                gapMs == null -> "unmeasured"
+                gapMs > SEAM_VIDEO_GAP_WARN_MS -> "HOLD"
+                gapMs < -SEAM_VIDEO_GAP_WARN_MS -> "OVERLAP"
+                else -> "ok"
+            }
+            Log.i(TAG, "SEAM #${n + 1}/${seamOffsetsMs.size} '$itemName' at ${formatTimestamp(offsetMs)} (src ${formatTimestamp(rangeStartMs + offsetMs)}) -- " +
+                "video gap ${gapMs?.let { String.format(Locale.US, "%+d", it) } ?: "?"}ms, " +
+                "audio slice starts ${audioMs?.let { String.format(Locale.US, "%+.1f", it) } ?: "n/a"}ms after the seam -- $verdict")
+            if (verdict == "HOLD" || verdict == "OVERLAP") flagged.add("#${n + 1} at ${formatTimestamp(offsetMs)} ($verdict ${gapMs}ms)")
+        }
+        Log.i(TAG, "SEAM SUMMARY '$itemName': ${seamOffsetsMs.size} seam(s), first at ${formatTimestamp(seamOffsetsMs.first())}, last at ${formatTimestamp(seamOffsetsMs.last())}; " +
+            if (flagged.isEmpty()) "none with a video hold or overlap beyond ${SEAM_VIDEO_GAP_WARN_MS}ms"
+            else "${flagged.size} worth looking at: ${flagged.joinToString("; ")}")
     }
 
     /**
@@ -2926,7 +3093,11 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         overrunToleranceMs: Long = CHUNK_OVERRUN_TOLERANCE_MS
     ): Boolean {
         val probe = probeMedia(outputFile)
-        val actualMs = probe?.formatDurationMs
+        val containerMs = probe?.formatDurationMs
+        // The video track decides how long the file is, for the reason given
+        // in verifyChunkDuration; the container reports whichever track is
+        // longer, which is usually the audio by up to a packet.
+        val actualMs = probe?.videoDurationMs ?: containerMs
         if (probe == null || actualMs == null) {
             Log.e(TAG, "verifyAssembledDuration: '$itemName' ffprobe could not read duration of assembled ${outputFile.absolutePath}")
             return false
@@ -2934,7 +3105,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         val videoMs = probe.videoDurationMs
         val audioMs = probe.audioDurationMs
         Log.d(TAG, "verifyAssembledDuration: '$itemName' per-track -- video=${videoMs}ms (delta=${videoMs?.let { it - expectedTotalMs }}ms vs expected) " +
-            "audio=${audioMs}ms (delta=${audioMs?.let { it - expectedTotalMs }}ms vs expected) container=${actualMs}ms (delta=${actualMs - expectedTotalMs}ms)")
+            "audio=${audioMs}ms (delta=${audioMs?.let { it - expectedTotalMs }}ms vs expected) container=${containerMs}ms (delta=${containerMs?.let { it - expectedTotalMs }}ms); judged on ${if (videoMs != null) "video" else "container"}")
         val shortfallMs = expectedTotalMs - actualMs
         val ok = shortfallMs <= toleranceMs && -shortfallMs <= overrunToleranceMs
         Log.d(TAG, "verifyAssembledDuration: '$itemName' expected=${expectedTotalMs}ms actual=${actualMs}ms shortfall=${shortfallMs}ms ${if (ok) "OK" else "MISMATCH"}")
@@ -4441,10 +4612,19 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * input: `-ss`/`-t` (see [planAudioWindow]) select its packets, and
      * `-copypriorss 0` makes the cut strict -- the demuxer seeks to a packet
      * at or before the start, and without it that earlier packet would be
-     * copied as well. It also drops the encoder's priming packet from the
-     * first chunk, which sits at a negative presentation time. The first
-     * packet kept lands at ~0 in this file, which is why placing it in the
-     * finished timeline falls to [patchFragmentTimestamps].
+     * copied as well. The first packet kept lands at ~0 in this file, which
+     * is why placing it in the finished timeline falls to
+     * [patchFragmentTimestamps].
+     *
+     * The slice that opens the range is the exception, when the priming is
+     * kept ([AudioWindow.keepsPriming]): it begins with the encoder's
+     * priming packet, at negative presentation time. It gets no strict cut
+     * (that would discard the packet), no make_zero (that would slide
+     * everything, video included, 21ms later to bring it to zero) and, if
+     * the output is fragmented, delay_moov rather than empty_moov (without
+     * it the muxer cannot write the edit list that tells a player to skip
+     * the packet). The result is an audio track whose edit list starts one
+     * packet in, and a video track that has not moved.
      *
      * [videoLimitSeconds] is the input-side `-t` on the video: how an
      * overrunning leg is cut back to its window (see [addAudioAndMux]).
@@ -4480,8 +4660,27 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         }
         args.addAll(listOf("-map", "0:v:0"))
         if (audio != null) args.addAll(listOf("-map", "1:a:0"))
-        args.addAll(listOf("-c", "copy", "-copypriorss", "0", "-avoid_negative_ts", "make_zero", "-max_muxing_queue_size", "1024"))
-        if (fragmented) args.addAll(listOf("-movflags", "frag_keyframe+empty_moov+default_base_moof"))
+        val keepsPriming = audio?.keepsPriming == true
+        args.addAll(listOf("-c", "copy"))
+        // The cut at the slice's start is strict -- except for the slice that
+        // deliberately opens with the priming packet, which sits before time
+        // zero, exactly what a strict cut discards.
+        if (!keepsPriming) args.addAll(listOf("-copypriorss", "0"))
+        // Likewise make_zero, which slides every stream later until the
+        // earliest timestamp is zero. With the priming packet at -21ms that
+        // would drag the whole chunk, video included, 21ms late and strip the
+        // declaration that makes a player skip it -- the shift this exists to
+        // avoid. "disabled" leaves it at negative time, where the muxer turns
+        // it into an edit list on the audio track.
+        args.addAll(listOf("-avoid_negative_ts", if (keepsPriming) "disabled" else "make_zero", "-max_muxing_queue_size", "1024"))
+        if (fragmented) {
+            // empty_moov writes the moov before any packet exists, and then cannot
+            // declare that the audio starts early ("No meaningful edit list will be
+            // written when using empty_moov without delay_moov"); delay_moov holds
+            // the moov until the first fragment is cut, which is what lets it.
+            val moov = if (keepsPriming) "delay_moov" else "empty_moov"
+            args.addAll(listOf("-movflags", "frag_keyframe+$moov+default_base_moof"))
+        }
         args.addAll(listOf("-f", "mp4", outFile.absolutePath))
         // Stream-copy work, budgeted by bytes rather than a flat 60s -- a remux
         // of a multi-gigabyte 4K leg and one of a small 480p leg were held to the
@@ -4844,7 +5043,14 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         }
         // See verifyOutputResolution's note on [probe]: supplied where the
         // caller has already probed this file, re-probed here otherwise.
-        val actualMs = (probe ?: probeMedia(file))?.formatDurationMs
+        val resolved = probe ?: probeMedia(file)
+        // The video track says how long a chunk is, not whichever track is
+        // longest. The audio runs a little past the video by construction --
+        // its window is cut on packet boundaries, and the first chunk's also
+        // carries the priming packet -- and a measure that followed it would
+        // drift away from the one thing the timeline is actually made of. The
+        // container's figure stays in the log.
+        val actualMs = resolved?.videoDurationMs ?: resolved?.formatDurationMs
         if (actualMs == null) {
             Log.e(TAG, "verifyChunkDuration: '$itemName' ffprobe could not read duration of ${file.absolutePath}")
             return false
@@ -4852,7 +5058,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         val shortfallMs = expectedMs - actualMs
         val overrunMs = -shortfallMs
         val ok = shortfallMs <= toleranceMs && overrunMs <= overrunToleranceMs
-        Log.d(TAG, "verifyChunkDuration: '$itemName' expected=${expectedMs}ms actual=${actualMs}ms shortfall=${shortfallMs}ms (tolerance ${toleranceMs}ms short / ${overrunToleranceMs}ms long) ${if (ok) "OK" else "REJECTED"}")
+        Log.d(TAG, "verifyChunkDuration: '$itemName' expected=${expectedMs}ms actual(video)=${actualMs}ms shortfall=${shortfallMs}ms (container=${resolved?.formatDurationMs}ms; tolerance ${toleranceMs}ms short / ${overrunToleranceMs}ms long) ${if (ok) "OK" else "REJECTED"}")
         if (!ok && shortfallMs > toleranceMs) {
             Log.e(TAG, "verifyChunkDuration: '$itemName' is ${shortfallMs}ms shorter than expected -- rejecting rather than shipping a silently truncated file")
         } else if (!ok) {
@@ -5555,10 +5761,10 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * time ([audioFirstTickFor]) is what makes the assembled audio
      * track exactly continuous: every packet lands on the packet grid, and
      * decoding an assembled file gives, sample for sample, what decoding the
-     * single encode it was cut from gives with its priming packet dropped
-     * (no sample differs) -- where a uniform millisecond offset left
-     * irregular packet spacing at every seam. Build the map with
-     * [chunkPlacementTicks].
+     * single encode it was cut from gives (no sample differs, the first
+     * block included, because the priming packet is kept and declared) --
+     * where a uniform millisecond offset left irregular packet spacing at
+     * every seam. Build the map with [chunkPlacementTicks].
      *
      * The video figure must be time elapsed since this session's FIRST
      * chunk -- chunkStartMs minus chunkBoundaries.first().startMs, NOT the
@@ -5596,6 +5802,60 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         } catch (e: Exception) {
             Log.w(TAG, "patchFragmentTimestamps: failed on ${file.absolutePath} (${e.message}) -- this chunk will play with a seam discontinuity")
         }
+    }
+
+    /** media_time of the first entry of the `elst` box at [elstPos], in the
+     *  track's ticks; null if it has no entries. Entries start at +16:
+     *  segment_duration, then media_time, 4 bytes each in version 0 and 8 in
+     *  version 1. -1 is an empty edit (a delay), not a skip. */
+    private fun readFirstEditMediaTime(raf: RandomAccessFile, elstPos: Long): Long? {
+        raf.seek(elstPos + 8)
+        val version = raf.readByte().toInt()
+        raf.seek(elstPos + 12)
+        if (raf.readIntBE() <= 0) return null
+        return if (version == 1) {
+            raf.seek(elstPos + 16 + 8); raf.readLongBE()
+        } else {
+            raf.seek(elstPos + 16 + 4); raf.readIntBE().toLong()
+        }
+    }
+
+    /** Where the first edit of [file]'s audio track starts in the media, in the
+     *  audio track's ticks, or null if it has no edit list or no audio track.
+     *  For an AAC track that is how the encoder's priming packet is declared:
+     *  playback starts this many ticks in, so a player skips the packet. Reading
+     *  it back from a finished file is how this code confirms the declaration
+     *  survived a mux or a re-wrap, rather than assuming ffmpeg kept it. */
+    private fun readAudioEditListStartTicks(file: File): Long? {
+        try {
+            RandomAccessFile(file, "r").use { raf ->
+                val moov = findTopLevelBox(raf, 0L, raf.length(), "moov") ?: return null
+                var pos = moov.first + 8
+                while (pos + 8 <= moov.second) {
+                    val (type, size) = readBoxHeader(raf, pos) ?: break
+                    if (type == "trak") {
+                        val trakEnd = pos + size
+                        val mdia = findTopLevelBox(raf, pos + 8, trakEnd, "mdia")
+                        val hdlr = mdia?.let { findTopLevelBox(raf, it.first + 8, it.second, "hdlr") }
+                        if (hdlr != null) {
+                            raf.seek(hdlr.first + 16) // handler_type
+                            val handler = ByteArray(4)
+                            raf.readFully(handler)
+                            if (String(handler, Charsets.US_ASCII) == "soun") {
+                                val edts = findTopLevelBox(raf, pos + 8, trakEnd, "edts") ?: return null
+                                val elst = findTopLevelBox(raf, edts.first + 8, edts.second, "elst") ?: return null
+                                return readFirstEditMediaTime(raf, elst.first)
+                            }
+                        }
+                    }
+                    if (size <= 0L) break
+                    pos += size
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "readAudioEditListStartTicks: couldn't parse ${file.absolutePath}'s moov (${e.message})")
+        }
+        return null
     }
 
     /** Track ID of [file]'s first audio ("soun") track, or null if it has none

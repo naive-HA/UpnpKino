@@ -62,8 +62,8 @@
         All references to libass are for descriptive and interoperability purposes only.
         No copyright or trademark claims are made to libass or any related intellectual property.
         libass source code can be found at: https://github.com/libass/libass\n\n
-        The FFmpeg and FFprobe binaries were compiled with the script found at: https://raw.githubusercontent.com/naive-HA/UpnpKino/refs/heads/main/app/src/main/jniLibs/arm64-v8a/build_libffmpeg_for_android_gpl_free.sh
-        from the source code found at: https://github.com/naive-HA/UpnpKino/tree/main/ffmpeg6</string>
+        The FFmpeg and FFprobe binaries were compiled with the script found at: https://raw.githubusercontent.com/naive-HA/UpnpKino/refs/heads/main/app/src/main/jniLibs/build_ffmpeg.sh
+        from the source code found at: https://github.com/naive-HA/UpnpKino/tree/main/ffmpeg</string>
 
     <string name="version_info">UPnP Kino by naiveHA %1$s\nhttps://github.com/naive-HA/UpnpKino</string>
     <string name="stop_upnp_kino">Stop UPnP Kino</string>
