@@ -1,6 +1,5 @@
 package acab.naiveha.upnpkino
 
-import android.Manifest
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.content.ClipData
@@ -31,24 +30,27 @@ import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 
 class MainActivity : AppCompatActivity() {
+    companion object {
+        private const val TAG = "MainActivity"
+    }
     private lateinit var binding: ActivityMainBinding
     private lateinit var preferences: Preferences
     private lateinit var startingAnimation: ValueAnimator
     private val requestMultiplePermissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-        Log.d("upnpkino", "Permission results: $permissions")
+        Log.d(TAG, "Permission results: $permissions")
         val deniedPermissions = permissions.filter { !it.value }.keys
         val isPartialAccessGranted = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            val fromCallback = permissions[Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED] == true
-            val fromCheck = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
-            Log.d("upnpkino", "Partial access check: fromCallback=$fromCallback, fromCheck=$fromCheck")
+            val fromCallback = permissions["android.permission.READ_MEDIA_VISUAL_USER_SELECTED"] == true
+            val fromCheck = ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == PackageManager.PERMISSION_GRANTED
+            Log.d(TAG, "Partial access check: fromCallback=$fromCallback, fromCheck=$fromCheck")
             fromCallback || fromCheck
         } else {
             false
         }
         val realDenials = deniedPermissions.filter {
-            val isBroadMedia = it == Manifest.permission.READ_MEDIA_IMAGES || it == Manifest.permission.READ_MEDIA_VIDEO
+            val isBroadMedia = it == "android.permission.READ_MEDIA_IMAGES" || it == "android.permission.READ_MEDIA_VIDEO"
             if (isPartialAccessGranted && isBroadMedia) {
-                Log.d("upnpkino", "Filtering out broad media denial because partial access is granted: $it")
+                Log.d(TAG, "Filtering out broad media denial because partial access is granted: $it")
                 false
             } else {
                 true
@@ -56,9 +58,9 @@ class MainActivity : AppCompatActivity() {
         }
         if (realDenials.isNotEmpty()) {
             Toast.makeText(this, getString(R.string.permissions_required, realDenials.toString()), Toast.LENGTH_LONG).show()
-            Log.d("upnpkino", "Real denials reported to user: $realDenials")
+            Log.d(TAG, "Real denials reported to user: $realDenials")
         } else {
-            Log.d("upnpkino", "No real denials to report.")
+            Log.d(TAG, "No real denials to report.")
         }
     }
     private val selectLocalMovieFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
@@ -99,19 +101,19 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val requiredPermissions = mutableListOf<String>()
-        requiredPermissions.add(Manifest.permission.POST_NOTIFICATIONS)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.VANILLA_ICE_CREAM) {
-            requiredPermissions.add("android.permission.ACCESS_LOCAL_NETWORK")
-        }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            requiredPermissions.add(Manifest.permission.READ_MEDIA_IMAGES)
-            requiredPermissions.add(Manifest.permission.READ_MEDIA_VIDEO)
-            requiredPermissions.add(Manifest.permission.READ_MEDIA_AUDIO)
+            requiredPermissions.add("android.permission.POST_NOTIFICATIONS")
+            requiredPermissions.add("android.permission.READ_MEDIA_IMAGES")
+            requiredPermissions.add("android.permission.READ_MEDIA_VIDEO")
+            requiredPermissions.add("android.permission.READ_MEDIA_AUDIO")
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                requiredPermissions.add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+                requiredPermissions.add("android.permission.READ_MEDIA_VISUAL_USER_SELECTED")
             }
         } else {
-            requiredPermissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            requiredPermissions.add("android.permission.READ_EXTERNAL_STORAGE")
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            requiredPermissions.add("android.permission.ACCESS_LOCAL_NETWORK")
         }
         val missingPermissions = requiredPermissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -124,7 +126,17 @@ class MainActivity : AppCompatActivity() {
             preferences.clearLocalMovieFolderUri()
             selectLocalMovieFolderLauncher.launch(null)
         }
+        binding.button2Label.setOnClickListener {
+            preferences.clearLocalMovieFolderUri()
+            selectLocalMovieFolderLauncher.launch(null)
+        }
         binding.button2.setOnLongClickListener {
+            preferences.clearLocalMovieFolderUri()
+            Constants.vibrate(this)
+            Toast.makeText(this, getString(R.string.toast_video_library_cleared), Toast.LENGTH_SHORT).show()
+            true
+        }
+        binding.button2Label.setOnLongClickListener {
             preferences.clearLocalMovieFolderUri()
             Constants.vibrate(this)
             Toast.makeText(this, getString(R.string.toast_video_library_cleared), Toast.LENGTH_SHORT).show()
@@ -134,7 +146,17 @@ class MainActivity : AppCompatActivity() {
             preferences.clearLocalMusicFolderUri()
             selectLocalMusicFolderLauncher.launch(null)
         }
+        binding.button3Label.setOnClickListener {
+            preferences.clearLocalMusicFolderUri()
+            selectLocalMusicFolderLauncher.launch(null)
+        }
         binding.button3.setOnLongClickListener {
+            preferences.clearLocalMusicFolderUri()
+            Constants.vibrate(this)
+            Toast.makeText(this, getString(R.string.toast_music_library_cleared), Toast.LENGTH_SHORT).show()
+            true
+        }
+        binding.button3Label.setOnLongClickListener {
             preferences.clearLocalMusicFolderUri()
             Constants.vibrate(this)
             Toast.makeText(this, getString(R.string.toast_music_library_cleared), Toast.LENGTH_SHORT).show()
@@ -298,24 +320,26 @@ class MainActivity : AppCompatActivity() {
                 throw Exception("Error: Could not get IP address")
             }
 
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                throw Exception("Error: Notification permission not granted")
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                if (ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                    throw Exception("Error: Notification permission not granted")
+                }
             }
             if (android.os.Build.VERSION.SDK_INT >= 35 && ContextCompat.checkSelfPermission(this, "android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED) {
                 throw Exception("Error: Local network permission not granted")
             }
 
             val hasVisualPermission = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                val hasImages = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
-                val hasVideo = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
-                val hasPartial = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
-                Log.d("upnpkino", "toggleService visual check: hasImages=$hasImages, hasVideo=$hasVideo, hasPartial=$hasPartial")
+                val hasImages = ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_IMAGES") == PackageManager.PERMISSION_GRANTED
+                val hasVideo = ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_VIDEO") == PackageManager.PERMISSION_GRANTED
+                val hasPartial = ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == PackageManager.PERMISSION_GRANTED
+                Log.d(TAG, "toggleService visual check: hasImages=$hasImages, hasVideo=$hasVideo, hasPartial=$hasPartial")
                 hasImages || hasVideo || hasPartial
             } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
+                ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_IMAGES") == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_VIDEO") == PackageManager.PERMISSION_GRANTED
             } else {
-                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                ContextCompat.checkSelfPermission(this, "android.permission.READ_EXTERNAL_STORAGE") == PackageManager.PERMISSION_GRANTED
             }
 
             if (!hasVisualPermission) {
@@ -323,7 +347,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                if (ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_AUDIO") != PackageManager.PERMISSION_GRANTED) {
                     throw Exception("Error: Audio storage permission not granted")
                 }
             }

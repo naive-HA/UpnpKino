@@ -18,10 +18,10 @@ android {
         minSdk = 29
         //noinspection EditedTargetSdkVersion
         targetSdk = 37
-        versionCode = 12
+        versionCode = 13
         val version = 4
         val versionMajor = 0
-        val versionMinor = 1
+        val versionMinor = 2
         versionName = "${version}.${versionMajor}.${versionMinor}"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -33,7 +33,7 @@ android {
         create("arm64") {
             dimension = "distribution"
             applicationId = "acab.naiveha.upnpkino"
-            versionCode = 2011
+            versionCode = 2013
             ndk {
                 //noinspection ChromeOsAbiSupport
                 abiFilters += "arm64-v8a"
@@ -42,7 +42,7 @@ android {
         create("armv7") {
             dimension = "distribution"
             applicationId = "acab.naiveha.upnpkino"
-            versionCode = 1011
+            versionCode = 1013
             ndk {
                 //noinspection ChromeOsAbiSupport
                 abiFilters += "armeabi-v7a"
@@ -51,7 +51,7 @@ android {
         create("x86") {
             dimension = "distribution"
             applicationId = "acab.naiveha.upnpkino"
-            versionCode = 3011
+            versionCode = 3013
             ndk {
                 //noinspection ChromeOsAbiSupport
                 abiFilters += "x86"
@@ -60,7 +60,7 @@ android {
         create("x86_64") {
             dimension = "distribution"
             applicationId = "acab.naiveha.upnpkino"
-            versionCode = 4011
+            versionCode = 4013
             ndk {
                 //noinspection ChromeOsAbiSupport
                 abiFilters += "x86_64"
@@ -69,7 +69,7 @@ android {
         create("aab") {
             dimension = "distribution"
             applicationId = "acab.naiveha.upnpkino.by.naiveha"
-            versionCode = 11
+            versionCode = 13
             ndk {
                 //noinspection ChromeOsAbiSupport
                 abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")

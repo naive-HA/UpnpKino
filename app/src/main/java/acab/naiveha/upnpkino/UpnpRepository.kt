@@ -49,7 +49,19 @@ object UpnpRepository {
         private val _repeatAliveNotification = MutableStateFlow(false)
         val repeatAliveNotification = _repeatAliveNotification.asStateFlow()
 
+        private val _ssdpTimeoutSec = MutableStateFlow(8)
+        val ssdpTimeoutSec = _ssdpTimeoutSec.asStateFlow()
+
+        private val _receiveBufferSize = MutableStateFlow(32768)
+        val receiveBufferSize = _receiveBufferSize.asStateFlow()
+
+        private val _datagramBufferSize = MutableStateFlow(4096)
+        val datagramBufferSize = _datagramBufferSize.asStateFlow()
+
         fun setRepeatAliveNotification(value: Boolean) { _repeatAliveNotification.value = value }
+        fun setSsdpTimeoutSec(value: Int) { _ssdpTimeoutSec.value = value }
+        fun setReceiveBufferSize(value: Int) { _receiveBufferSize.value = value }
+        fun setDatagramBufferSize(value: Int) { _datagramBufferSize.value = value }
 
         fun stop() {
             _repeatAliveNotification.value = false

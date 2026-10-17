@@ -37,11 +37,137 @@ class DlnaActivity : AppCompatActivity() {
     private lateinit var binding: ActivityDlnaBinding
     private lateinit var startingAnimation: ValueAnimator
     private var isWaitingForSeek = false
+    private var currentTab = 1 // 0: Settings, 1: DLNA, 2: Transcoding
+    private var tabAnimator: ValueAnimator? = null
+    private lateinit var gestureDetector: android.view.GestureDetector
+
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent?): Boolean {
+        ev?.let { if (::gestureDetector.isInitialized) gestureDetector.onTouchEvent(it) }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun switchTab(targetTab: Int) {
+        if (targetTab == currentTab) return
+
+        val oldTab = currentTab
+        currentTab = targetTab
+
+        val activeColor = ContextCompat.getColor(this, R.color.label_enabled)
+
+        binding.tabSettingsDot?.apply {
+            if (targetTab == 0) {
+                setImageResource(R.drawable.ic_dot_filled)
+                androidx.core.widget.ImageViewCompat.setImageTintList(this, android.content.res.ColorStateList.valueOf(activeColor))
+            } else {
+                setImageResource(R.drawable.ic_dot_outline)
+                androidx.core.widget.ImageViewCompat.setImageTintList(this, null)
+            }
+        }
+
+        binding.tabDlnaDot?.apply {
+            if (targetTab == 1) {
+                setImageResource(R.drawable.ic_dot_filled)
+                androidx.core.widget.ImageViewCompat.setImageTintList(this, android.content.res.ColorStateList.valueOf(activeColor))
+            } else {
+                setImageResource(R.drawable.ic_dot_outline)
+                androidx.core.widget.ImageViewCompat.setImageTintList(this, null)
+            }
+        }
+
+        binding.tabTranscodingDot?.apply {
+            if (targetTab == 2) {
+                setImageResource(R.drawable.ic_dot_filled)
+                androidx.core.widget.ImageViewCompat.setImageTintList(this, android.content.res.ColorStateList.valueOf(activeColor))
+            } else {
+                setImageResource(R.drawable.ic_dot_outline)
+                androidx.core.widget.ImageViewCompat.setImageTintList(this, null)
+            }
+        }
+
+        val views = listOf(
+            binding.contentGroupSettings,
+            binding.contentGroup,
+            binding.contentGroupTranscoding
+        )
+
+        val parentWidth = binding.main.width.toFloat().let { if (it == 0f) 1000f else it }
+        val totalDistance = kotlin.math.abs(targetTab - oldTab)
+        val duration = if (totalDistance > 1) 400L else 250L
+
+        views.forEach { v ->
+            v?.visibility = android.view.View.VISIBLE
+        }
+
+        tabAnimator?.cancel()
+        tabAnimator = ValueAnimator.ofFloat(oldTab.toFloat(), targetTab.toFloat()).apply {
+            this.duration = duration
+            interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+            addUpdateListener { anim ->
+                val progress = anim.animatedValue as Float
+                views.forEachIndexed { index, view ->
+                    view?.translationX = (index - progress) * parentWidth
+                }
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    views.forEachIndexed { index, view ->
+                        if (index == targetTab) {
+                            view?.visibility = android.view.View.VISIBLE
+                            view?.translationX = 0f
+                        } else {
+                            view?.visibility = android.view.View.GONE
+                            view?.translationX = 0f
+                        }
+                    }
+                }
+            })
+            start()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         binding = ActivityDlnaBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        binding.tabSettings?.setOnClickListener { switchTab(0) }
+        binding.tabDlna?.setOnClickListener { switchTab(1) }
+        binding.tabTranscoding?.setOnClickListener { switchTab(2) }
+
+        gestureDetector = android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            private val SWIPE_THRESHOLD = 100
+            private val SWIPE_VELOCITY_THRESHOLD = 100
+
+            override fun onFling(
+                e1: android.view.MotionEvent?,
+                e2: android.view.MotionEvent,
+                velocityX: Float,
+                velocityY: Float
+            ): Boolean {
+                if (e1 == null) return false
+                val diffX = e2.x - e1.x
+                val diffY = e2.y - e1.y
+                if (kotlin.math.abs(diffX) > kotlin.math.abs(diffY)) {
+                    if (kotlin.math.abs(diffX) > SWIPE_THRESHOLD && kotlin.math.abs(velocityX) > SWIPE_VELOCITY_THRESHOLD) {
+                        if (diffX > 0) {
+                            // Swipe Right -> previous tab
+                            if (currentTab > 0) {
+                                switchTab(currentTab - 1)
+                                return true
+                            }
+                        } else {
+                            // Swipe Left -> next tab
+                            if (currentTab < 2) {
+                                switchTab(currentTab + 1)
+                                return true
+                            }
+                        }
+                    }
+                }
+                return false
+            }
+        })
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.main) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -134,15 +260,88 @@ class DlnaActivity : AppCompatActivity() {
                 .setPositiveButton(android.R.string.ok, null)
                 .show()
         }
-        binding.textView.text = getString(R.string.version_info, BuildConfig.VERSION_NAME)
-        binding.textView.setOnClickListener {
+        // SSDP Timings Toggle Group
+        binding.toggleGroupSsdp?.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                val sec = when (checkedId) {
+                    R.id.btn_ssdp_5s -> 5
+                    R.id.btn_ssdp_15s -> 15
+                    else -> 8
+                }
+                binding.valueSsdpTiming?.text = "$sec s"
+                UpnpRepository.upnp.setSsdpTimeoutSec(sec)
+            }
+        }
+        when (UpnpRepository.upnp.ssdpTimeoutSec.value) {
+            5 -> binding.toggleGroupSsdp?.check(R.id.btn_ssdp_5s)
+            15 -> binding.toggleGroupSsdp?.check(R.id.btn_ssdp_15s)
+            else -> binding.toggleGroupSsdp?.check(R.id.btn_ssdp_8s)
+        }
+        binding.resetSsdp?.setOnClickListener {
+            binding.toggleGroupSsdp?.check(R.id.btn_ssdp_8s)
+        }
+
+        // Buffer Size Toggle Group
+        binding.toggleGroupBuffer?.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                val size = when (checkedId) {
+                    R.id.btn_buf_8k -> 8192
+                    R.id.btn_buf_16k -> 16384
+                    R.id.btn_buf_64k -> 65536
+                    R.id.btn_buf_256k -> 262144
+                    else -> 32768
+                }
+                binding.valueBufferSize?.text = "$size bytes"
+                UpnpRepository.upnp.setReceiveBufferSize(size)
+            }
+        }
+        when (UpnpRepository.upnp.receiveBufferSize.value) {
+            8192 -> binding.toggleGroupBuffer?.check(R.id.btn_buf_8k)
+            16384 -> binding.toggleGroupBuffer?.check(R.id.btn_buf_16k)
+            65536 -> binding.toggleGroupBuffer?.check(R.id.btn_buf_64k)
+            262144 -> binding.toggleGroupBuffer?.check(R.id.btn_buf_256k)
+            else -> binding.toggleGroupBuffer?.check(R.id.btn_buf_32k)
+        }
+        binding.resetBuffer?.setOnClickListener {
+            binding.toggleGroupBuffer?.check(R.id.btn_buf_32k)
+        }
+
+        // Datagram Buffer Toggle Group
+        binding.toggleGroupDatagram?.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                val size = when (checkedId) {
+                    R.id.btn_data_1500 -> 1500
+                    R.id.btn_data_2048 -> 2048
+                    R.id.btn_data_8192 -> 8192
+                    else -> 4096
+                }
+                binding.valueDatagramBuffer?.text = "$size bytes"
+                UpnpRepository.upnp.setDatagramBufferSize(size)
+            }
+        }
+        when (UpnpRepository.upnp.datagramBufferSize.value) {
+            1500 -> binding.toggleGroupDatagram?.check(R.id.btn_data_1500)
+            2048 -> binding.toggleGroupDatagram?.check(R.id.btn_data_2048)
+            8192 -> binding.toggleGroupDatagram?.check(R.id.btn_data_8192)
+            else -> binding.toggleGroupDatagram?.check(R.id.btn_data_4096)
+        }
+        binding.resetDatagram?.setOnClickListener {
+            binding.toggleGroupDatagram?.check(R.id.btn_data_4096)
+        }
+        val versionText = getString(R.string.version_info, BuildConfig.VERSION_NAME)
+        binding.textView?.text = versionText
+        binding.textView?.setOnClickListener {
             openUrl()
         }
-        binding.textView2.text = getString(R.string.tips_message, getString(R.string.btc_address))
-        binding.textView2.setOnClickListener {
+        binding.textView3?.text = versionText
+        binding.textView3?.setOnClickListener {
+            openUrl()
+        }
+        binding.textView2?.text = getString(R.string.tips_message, getString(R.string.btc_address))
+        binding.textView2?.setOnClickListener {
             copyBtcAddressToClipboard()
         }
-        binding.textView2.setOnLongClickListener {
+        binding.textView2?.setOnLongClickListener {
             copyBtcAddressToClipboard()
             true
         }

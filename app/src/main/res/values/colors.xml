@@ -3,4 +3,6 @@
     <color name="darker_grey">#494949</color>
     <color name="label_enabled">#000000</color>
     <color name="label_disabled">#A9A9A9</color>
+    <color name="tab_container_bg">#FFFFFF</color>
+    <color name="dot_outline_color">#FF000000</color>
 </resources>

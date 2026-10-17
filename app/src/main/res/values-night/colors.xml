@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="label_enabled">#FFFFFF</color>
+    <color name="tab_container_bg">#121212</color>
+    <color name="dot_outline_color">#7C7C7C7C</color>
 </resources>

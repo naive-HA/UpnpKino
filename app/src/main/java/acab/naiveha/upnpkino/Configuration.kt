@@ -7,7 +7,7 @@ import java.net.InetAddress
 class Configuration(val context: Context, val upnpService: UpnpService) {
     var ip: InetAddress? = null
     var httpPort: Int = 0
-    val deviceName = "UPnP Kino by naive-HA (${Build.MODEL})"
+    val deviceName = "UPnP Kino by naiveha (${Build.MODEL})"
     val osName = "${System.getProperty("os.name")}/${System.getProperty("os.version")}"
     val uuid: String by lazy {
         upnpService.preferences.getDeviceUuid()

@@ -115,4 +115,7 @@
           - VLC: Extensively tested on Desktop and Mobile.\n
           - eezUPnP: Confirmed working.\n
           - Kodi: Confirmed working. In certain cases, you might need to start Kodi first, then start UPnP Kino.</string>
+    <string name="tab_settings">Settings</string>
+    <string name="tab_dlna">Control</string>
+    <string name="tab_transcoding">Transcode</string>
 </resources>

@@ -14,6 +14,7 @@ import java.net.NetworkInterface
 import java.net.SocketTimeoutException
 import android.util.Log
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 class MulticastServer(private val upnpService: UpnpService) {
 
@@ -44,7 +45,7 @@ class MulticastServer(private val upnpService: UpnpService) {
             socket = MulticastSocket(null)
             socket?.reuseAddress = true
             socket?.bind(InetSocketAddress(1900))
-            socket?.receiveBufferSize = 32768
+            socket?.receiveBufferSize = UpnpRepository.upnp.receiveBufferSize.value
             socket?.soTimeout = 1000
             
             val inetAddress = upnpService.configuration.getInetAddress()
@@ -92,7 +93,7 @@ class MulticastServer(private val upnpService: UpnpService) {
             Log.d("MulticastServer", "Starting control server thread")
             while (Thread.currentThread().isInterrupted.not()) {
                 try {
-                    val buffer = ByteArray(4096)
+                    val buffer = ByteArray(UpnpRepository.upnp.datagramBufferSize.value)
                     val packet = DatagramPacket(buffer, buffer.size)
                     socket?.receive(packet)
                     
@@ -204,14 +205,14 @@ class MulticastServer(private val upnpService: UpnpService) {
     private fun repeatAliveNotification(){
         scope.launch {
             upnpService.upnpMessages.draftNotifyMessage("alive").forEach { outboundMessages.send(it) }
-            delay(8000.milliseconds)
+            delay(UpnpRepository.upnp.ssdpTimeoutSec.value.seconds)
             UpnpRepository.upnp.setRepeatAliveNotification(false)
         }
     }
     private fun repeatMsearchNotification() {
         scope.launch {
             upnpService.upnpMessages.draftMsearchMessage().forEach { outboundMessages.send(it) }
-            delay(8000.milliseconds)
+            delay(UpnpRepository.upnp.ssdpTimeoutSec.value.seconds)
             UpnpRepository.dlna.setSearchForDevices(false)
         }
     }

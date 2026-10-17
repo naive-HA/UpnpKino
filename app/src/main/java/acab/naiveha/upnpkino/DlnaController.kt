@@ -44,6 +44,12 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
     private val subscriptionMutex = Mutex()
     private val pendingDevices = ConcurrentHashMap.newKeySet<String>()
     val dlnaDevices: MutableMap<String, DlnaNodeModel> = ConcurrentHashMap<String, DlnaNodeModel>()
+    enum class PlaybackCapability {
+        NATIVE,
+        TRANSCODE,
+        UNSUPPORTED
+    }
+
     init {
         scope.launch {
             repo.searchForDevices.collect { searching ->
@@ -67,7 +73,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                         return@collect
                     }
                     val deviceMediaCollection = UpnpRepository.kinoService.sharedMediaCollection.value.toMutableMap()
-                    device.setMediaCollection(deviceMediaCollection) // TODO filter out media files which cannot be played natively or transcoded
+                    device.setMediaCollection(deviceMediaCollection)
                 }
             }
         }
@@ -78,15 +84,23 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                     val selectedDevice = repo.devices.value?.get(selectedDeviceId) ?: return@collect
                     val mediaFile = selectedDevice.mediaCollection[selectedMediaFileId]
                     if (mediaFile is MediaCollection.MediaNode.Item) {
-                        val caps = upnpService.transcoderController.capabilities
-                        val transcodeTarget = resolveTranscodeTarget(
-                            sourceItem = mediaFile,
-                            device = selectedDevice,
-                            canEncodeVideo = { codec: Constants.Transcoder.VideoCodec -> caps?.verifiedVideo?.get(codec)?.isNotEmpty() == true },
-                            canEncodeVideoAtRes = { codec: Constants.Transcoder.VideoCodec, res: Constants.Transcoder.Resolution -> caps?.canEncode(codec, res) == true },
-                            canEncodeAudio = { codec: Constants.Transcoder.AudioCodec -> caps?.canEncodeAudio(codec) == true }
-                        )
-                        Log.d("DlnaController", "Resolved transcode target for ${mediaFile.name}: $transcodeTarget")
+
+                        val playbackProfile = determineBestPlaybackProfile(mediaFile = mediaFile, device = selectedDevice)
+                        when (resolvePlaybackCapability(mediaFile = mediaFile, device = selectedDevice, playbackProfile = playbackProfile)) {
+                            PlaybackCapability.NATIVE -> {
+                                Log.d("DlnaController", "Media file '${mediaFile.name}' can be played natively (Profile: $playbackProfile).")
+                            }
+                            PlaybackCapability.TRANSCODE -> {
+                                Log.d("DlnaController", "Media file '${mediaFile.name}' needs transcoding (Profile: $playbackProfile).")
+                            }
+                            PlaybackCapability.UNSUPPORTED -> {
+                                Log.d("DlnaController", "Media file '${mediaFile.name}' cannot be played (unsupported).")
+                                repo.setSelectedMediaFileId(null)
+                                return@collect
+                            }
+                        }
+                    } else {
+                        repo.setSelectedMediaFileId(null)
                     }
                 }
             }
@@ -247,6 +261,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             }
         }
     }
+
     private fun sendSubscribeRequest(device: DlnaNodeModel, url: String, callback: String, sid: String? = null): Pair<String, Int>? {
         val fullUrl = resolveUrl(device, url)
         Log.d("DlnaController", "Sending SUBSCRIBE request to $fullUrl (sid=$sid)")
@@ -280,6 +295,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             null
         }
     }
+
     private suspend fun startPolling() {
         val deviceId = repo.selectedDeviceId.value
         val devices = repo.devices.value
@@ -327,6 +343,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             }
         }
     }
+
     private fun syncSeekBar() {
         val response = sendMediaCommand(Action.GET_POSITION_INFO, mapOf())
         if (response != null) {
@@ -338,6 +355,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             }
         }
     }
+
     private fun getStreamingFeedbackFlag() {
         val response = sendMediaCommand(Action.GET_TRANSPORT_INFO, mapOf())
         if (response != null) {
@@ -349,6 +367,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             }
         }
     }
+
     private fun updateSeekBarPosition(position: String, duration: String) {
         //position format is like "00:00:00"
         //duration format is like "00:00:00"
@@ -364,6 +383,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             repo.setSeekBarDuration(secondsToDuration(durationInSeconds))
         }
     }
+
     private fun validateRemoteSession(): Boolean {
         val fileId = repo.selectedMediaFileId.value ?: return false
         val response = sendMediaCommand(Action.GET_MEDIA_INFO, mapOf())
@@ -377,6 +397,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         }
         return false
     }
+
     private fun sendMediaCommand(command: Action, args: Map<String, String>): String? {
         val deviceId = repo.selectedDeviceId.value
         val devices = repo.devices.value
@@ -420,6 +441,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             null
         }
     }
+
     fun handleMediaEvent(remoteAddr: String, payload: String) {
         Log.d("DlnaController", "Received event from $remoteAddr")
         when (repo.streamingFeedbackFlag.value) {
@@ -460,6 +482,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             }
         }
     }
+
     fun registerDevice(location: String) {
         if (!repo.searchForDevices.value) return
         if (dlnaDevices.values.any { it.location == location }) return
@@ -510,7 +533,8 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                                         if (sinkData.isBlank()) {
                                             return@let
                                         }
-                                        device.fromProtocolInfo(sinkData)
+                                        Log.d("DlnaController", "raw sink data: $sinkData")
+                                        device.readSinkProfilesFromProtocolInfo(sinkData)
                                         dlnaDevices[id] = device
                                         withContext(Dispatchers.Main) {
                                             repo.setDevices(dlnaDevices.toMap())
@@ -527,6 +551,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             }
         }
     }
+
     suspend fun interrogateDevice(location: String): UpnpNodeModel? = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
@@ -545,6 +570,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             null
         }
     }
+
     private fun resolveUrl(device: DlnaNodeModel, relativeUrl: String): String {
         if (relativeUrl.startsWith("http://") || relativeUrl.startsWith("https://")) {
             return relativeUrl
@@ -566,16 +592,19 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             baseUrl + relativeUrl
         }
     }
+
     fun release() {
         resetDlnaActivity()
         scope.cancel()
     }
+
     private fun resetDlnaActivity() {
         stopPlaying()
         repo.setSelectedDeviceId(null)
         repo.setDevices(null)
         dlnaDevices.clear()
     }
+
     private fun stopPlaying(){
         Log.d("DlnaController", "stopPlaying")
         val selectedDeviceId = repo.selectedDeviceId.value
@@ -590,6 +619,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         repo.setStreamingFeedbackFlag(ActionFeedback.STOPPED)
         stopPlayingLocal()
     }
+
     private fun stopPlayingLocal(){
         pollingJob?.cancel()
         pollingJob = null
@@ -600,72 +630,127 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         repo.setLoadingState(false)
     }
 
-    /**
-     * Resolves the optimal TranscodeProfile using a 5-step dimensional evaluation.
-     */
-    fun resolveTranscodeTarget(
-        sourceItem: MediaCollection.MediaNode.Item,
+    fun resolvePlaybackCapability(
+        mediaFile: MediaCollection.MediaNode.Item,
         device: DlnaNodeModel,
-        canEncodeVideo: (Constants.Transcoder.VideoCodec) -> Boolean,
-        canEncodeVideoAtRes: (Constants.Transcoder.VideoCodec, Constants.Transcoder.Resolution) -> Boolean,
-        canEncodeAudio: (Constants.Transcoder.AudioCodec) -> Boolean
+        playbackProfile: Constants.Transcoder.TranscodeProfile? = null
+    ): PlaybackCapability {
+        val profile = playbackProfile ?: determineBestPlaybackProfile(mediaFile, device) ?: return PlaybackCapability.UNSUPPORTED
+        val sourceVideoTrack = mediaFile.videoTracks.firstOrNull()
+        val sourceAudioTrack = mediaFile.audioTracks.firstOrNull()
+        val sourceHeight = sourceVideoTrack?.resolution?.split("x")?.getOrNull(1)?.toIntOrNull()
+        val sourceTier = sourceHeight?.let { h -> Constants.Transcoder.Priority.RESOLUTIONS.sortedBy { it.maxHeight }.find { it.maxHeight >= h } }
+        val sourceChannels = sourceAudioTrack?.channelCount
+        val sourceAudioQuality = sourceChannels?.let { channels -> Constants.Transcoder.Priority.AUDIO_QUALITIES.find { it.channelCount <= channels } }
+
+        val isNative = (profile.videoCodec == sourceVideoTrack?.codec) &&
+                       (profile.resolution == sourceTier) &&
+                       (profile.audioCodec == sourceAudioTrack?.codec) &&
+                       (profile.audioQuality == sourceAudioQuality) &&
+                       (profile.container == mediaFile.container)
+
+        return if (isNative) {
+            Log.d("DlnaController", "'${mediaFile.name}' can be played natively on '${device.friendlyName}'")
+            PlaybackCapability.NATIVE
+        } else {
+            Log.d("DlnaController", "'${mediaFile.name}' needs transcoding on '${device.friendlyName}' (Profile: $profile)")
+            PlaybackCapability.TRANSCODE
+        }
+    }
+
+    fun determineBestPlaybackProfile(
+        mediaFile: MediaCollection.MediaNode.Item,
+        device: DlnaNodeModel
     ): Constants.Transcoder.TranscodeProfile? {
-        val sink = device.sinkCapabilities
-        val sourceVideoCodec = sourceItem.videoTracks.firstOrNull()?.codec
-        val sourceAudioCodec = sourceItem.audioTracks.firstOrNull()?.codec
-        val sourceHeight = sourceItem.videoTracks.firstOrNull()?.resolution
-            ?.split("x")?.getOrNull(1)?.toIntOrNull() ?: 1080
-        val sourceTier = Constants.Transcoder.Priority.RESOLUTIONS.sortedBy { it.maxHeight }.find { it.maxHeight >= sourceHeight } ?: Constants.Transcoder.Resolution.HD_1080
-        val sourceChannels = sourceItem.audioTracks.firstOrNull()?.channelCount ?: 2
-        val sourceAudioQuality = Constants.Transcoder.Priority.AUDIO_QUALITIES.find { it.channelCount <= sourceChannels } ?: Constants.Transcoder.AudioQuality.STEREO
-        val sourceExt = sourceItem.name.substringAfterLast('.', "").lowercase()
-        val sourceContainer = when {
-            sourceExt in setOf("mkv") -> Constants.Transcoder.Container.MKV
-            sourceExt in setOf("ts", "mts") -> Constants.Transcoder.Container.MPEG_TS
-            else -> Constants.Transcoder.Container.MP4
+        val sinkProfiles = device.sinkProfiles
+
+        val sourceVideoTrack = mediaFile.videoTracks.firstOrNull()
+        val sourceAudioTrack = mediaFile.audioTracks.firstOrNull()
+
+        if (sourceVideoTrack == null && sourceAudioTrack == null) {
+            Log.d("DlnaController", "media file '${mediaFile.name}' has no video or audio tracks")
+            return null
         }
 
-        // Prefer Native / Minimum Effort: If sink accepts wildcard '*' or supports native source profile directly
-        if (sink.isWildcard || (
-            sourceVideoCodec != null && sink.supportsVideoCodec(sourceVideoCodec) &&
-            sink.supportsResolution(sourceTier) &&
-            sourceAudioCodec != null && sink.supportsAudioCodec(sourceAudioCodec) &&
-            sink.supportsChannelCount(sourceAudioQuality.channelCount) &&
-            sink.supportsContainer(sourceContainer)
-        )) {
+        val sourceVideoCodec = sourceVideoTrack?.codec
+        val sourceVideoProfile = sourceVideoTrack?.profileIdc
+        val sourceHeight = sourceVideoTrack?.resolution?.split("x")?.getOrNull(1)?.toIntOrNull()
+        val sourceTier = sourceHeight?.let { height ->
+            Constants.Transcoder.Priority.RESOLUTIONS.sortedBy { it.maxHeight }.find { it.maxHeight >= height }
+        }
+
+        val sourceAudioCodec = sourceAudioTrack?.codec
+        val sourceChannels = sourceAudioTrack?.channelCount
+        val sourceAudioQuality = sourceChannels?.let { channels ->
+            Constants.Transcoder.Priority.AUDIO_QUALITIES.find { it.channelCount <= channels }
+        }
+
+        val sourceContainer = mediaFile.container
+
+        val supportsNativePlay = sinkProfiles.supportsCandidateCombination(
+            videoCodec = sourceVideoCodec,
+            resolution = sourceTier,
+            audioCodec = sourceAudioCodec,
+            audioQuality = sourceAudioQuality,
+            container = sourceContainer,
+            videoProfile = sourceVideoProfile
+        )
+
+        if (supportsNativePlay) {
             return Constants.Transcoder.TranscodeProfile(
-                videoCodec = sourceVideoCodec ?: Constants.Transcoder.VideoCodec.H264,
+                videoCodec = sourceVideoCodec,
                 resolution = sourceTier,
-                audioCodec = sourceAudioCodec ?: Constants.Transcoder.AudioCodec.AAC,
+                audioCodec = sourceAudioCodec,
                 audioQuality = sourceAudioQuality,
-                container = sourceContainer
+                container = sourceContainer,
+                videoProfile = sourceVideoProfile
             )
         }
 
-        // Downward-only evaluation: Candidates start strictly at source tier & channel count and only go downwards
-        val candidateResolutions = Constants.Transcoder.Priority.RESOLUTIONS.filter { it.maxHeight <= sourceTier.maxHeight }
-        val candidateAudioQualities = Constants.Transcoder.Priority.AUDIO_QUALITIES.filter { it.channelCount <= sourceChannels }
+        val candidateResolutions = if (sourceTier != null) {
+            Constants.Transcoder.Priority.RESOLUTIONS.filter { it.maxHeight <= sourceTier.maxHeight }
+        } else {
+            emptyList()
+        }
+        val candidateAudioQualities = if (sourceChannels != null) {
+            Constants.Transcoder.Priority.AUDIO_QUALITIES.filter { it.channelCount <= sourceChannels }
+        } else {
+            emptyList()
+        }
 
-        for (videoCodec in Constants.Transcoder.Priority.VIDEO_CODECS) {
-            if (!canEncodeVideo(videoCodec)) continue
+        val videoCodecsToTry = if (sourceVideoTrack != null) Constants.Transcoder.Priority.VIDEO_CODECS else listOf(null)
+        val resolutionsToTry = if (sourceVideoTrack != null) candidateResolutions else listOf(null)
+        val audioCodecsToTry = if (sourceAudioTrack != null) Constants.Transcoder.Priority.AUDIO_CODECS else listOf(null)
+        val audioQualitiesToTry = if (sourceAudioTrack != null) candidateAudioQualities else listOf(null)
 
-            for (resolution in candidateResolutions) {
-                if (!canEncodeVideoAtRes(videoCodec, resolution)) continue
-
-                for (audioCodec in Constants.Transcoder.Priority.AUDIO_CODECS) {
-                    if (!canEncodeAudio(audioCodec)) continue
-
-                    for (audioQuality in candidateAudioQualities) {
-
+        for (videoCodec in videoCodecsToTry) {
+            for (resolution in resolutionsToTry) {
+                for (audioCodec in audioCodecsToTry) {
+                    for (audioQuality in audioQualitiesToTry) {
                         for (container in Constants.Transcoder.Priority.CONTAINERS) {
-                            if (sink.supportsCombination(videoCodec, resolution, audioCodec, audioQuality, container)) {
-                                return Constants.Transcoder.TranscodeProfile(
+                            if (sinkProfiles.supportsCandidateCombination(
+                                    videoCodec = videoCodec,
+                                    resolution = resolution,
+                                    audioCodec = audioCodec,
+                                    audioQuality = audioQuality,
+                                    container = container
+                                )) {
+                                val targetVideoProfile = sinkProfiles.getBestVideoProfile(
                                     videoCodec = videoCodec,
                                     resolution = resolution,
                                     audioCodec = audioCodec,
                                     audioQuality = audioQuality,
                                     container = container
                                 )
+                                val matchProfile = Constants.Transcoder.TranscodeProfile(
+                                    videoCodec = videoCodec,
+                                    resolution = resolution,
+                                    audioCodec = audioCodec,
+                                    audioQuality = audioQuality,
+                                    container = container,
+                                    videoProfile = targetVideoProfile
+                                )
+                                return matchProfile
                             }
                         }
                     }
@@ -674,5 +759,4 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         }
         return null
     }
-
 }

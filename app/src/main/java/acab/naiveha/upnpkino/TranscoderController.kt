@@ -6,6 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.app.ActivityManager
 import android.os.PowerManager
+import android.os.BatteryManager
+import android.os.Debug
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.MediaCodecInfo
 import android.media.MediaExtractor
@@ -21,9 +24,11 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.LockSupport
 import android.provider.MediaStore
 import android.provider.DocumentsContract
 import android.util.Log
+import android.system.Os
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -68,6 +73,11 @@ import android.view.Surface
 import androidx.media3.common.ColorInfo
 import androidx.media3.common.Format
 import androidx.media3.transformer.SurfaceAssetLoader
+import androidx.media3.transformer.InAppFragmentedMp4Muxer
+import androidx.media3.common.Metadata
+import androidx.media3.muxer.BufferInfo
+import androidx.media3.muxer.Muxer
+import java.nio.ByteBuffer
 import java.io.DataInputStream
 import java.io.EOFException
 import java.io.OutputStream
@@ -79,16 +89,6 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
     companion object {
         private const val TAG = "TranscoderController"
         private const val RETRY_DELAY_MS = 500L
-
-        /** Matches a floating point or integer number anywhere in raw ffprobe
-         *  `-of csv=p=0` output -- resilient to stray commas, "N/A", or other
-         *  formatting noise between values, which a strict per-line parse
-         *  (trim + toDoubleOrNull on the whole line) is not: at least one
-         *  ffprobe build emits a stray trailing comma on the first csv row of
-         *  any `-show_entries frame=...` output, for any file, which fails a
-         *  strict parse on exactly that row. Shared by
-         *  [probeKeyframeTimestampsMsViaFfprobe] and [probeFirstFramePtsMs]. */
-        private val FFPROBE_NUMBER_REGEX = Regex("""\d+(\.\d+)?""")
 
         /** SharedPreferences name/key for [setPersistedOutputDirectory]'s choice
          *  of output directory (E5). A dedicated file rather than a shared
@@ -102,14 +102,6 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         private const val HW_PROBE_TIME_LIMIT_S = 2.0
         private const val HW_PROBE_TIMEOUT_MS = 10_000L
 
-        /** Bounds for [probeKeyframeTimestampsMsViaMediaExtractor]: an overall
-         *  wall-clock budget for the open+walk (best-effort -- see that
-         *  function's doc comment for why a wedged native call underneath
-         *  can still outlive this), and a hard cap on samples collected so a
-         *  MediaExtractor that never reports end-of-stream can't loop forever. */
-        private const val KEYFRAME_EXTRACTOR_TIMEOUT_MS = 20_000L
-        private const val KEYFRAME_EXTRACTOR_MAX_SAMPLES = 200_000
-
         /** Floor [resolveFfmpegInputPath] insists stay free, after accounting
          *  for the source's own size, before it will mirror a content:// item
          *  to local cache. A round, conservative number rather than derived
@@ -119,134 +111,157 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
          *  device. Tune freely; nothing else depends on the exact value. */
         private const val MIN_FREE_SPACE_AFTER_MIRROR_MB = 500L
 
-        /** How far a chunk's total duration may fall short of what was requested
-         *  before it's rejected. Was 2000ms -- loose enough that a real AV-sync
-         *  problem (a few hundred ms) would sail through as long as it stayed
-         *  under 2 full seconds. Tightened to just above realistic frame/AAC-block
-         *  quantization slack, so a genuine drift actually gets caught. */
+        /** How far the finished file's duration may fall short of what was
+         *  requested before [verifyAssembledDuration] rejects it by default. Was
+         *  2000ms -- loose enough that a real AV-sync problem (a few hundred ms)
+         *  would sail through as long as it stayed under 2 full seconds. Tightened
+         *  to just above realistic frame/AAC-block quantization slack, so a
+         *  genuine drift actually gets caught. (The end of a range is the one place
+         *  allowed more: see [FINAL_CHUNK_TOLERANCE_MS].) */
         private const val CHUNK_DURATION_TOLERANCE_MS = 250L
 
-        /** How far a chunk may *overrun* the requested duration before it's
-         *  rejected. Deliberately looser than [CHUNK_DURATION_TOLERANCE_MS], and
-         *  the asymmetry is the point: shortfall is the truncation bug that check
-         *  exists for, while overrun has legitimate sources -- the audio window
-         *  rounding up to a whole AAC packet, Media3 clipping on the safe path
-         *  running slightly past the requested end (cut back at the mux, see
-         *  [remuxVideoAndAudio], rather than by encoding extra and trimming). A false
-         *  rejection is maximally expensive (the chunk retries identically, fails
-         *  identically, then aborts the whole transcode), so the loose side stays
-         *  loose. Don't "fix" this back to symmetric. Real overrun still matters
-         *  -- a demuxer's seek can still land slightly past a requested boundary
-         *  on some inputs -- it just needs a wider bar than shortfall.
-         *  (The seam stutter this comment used to attribute to backwards -ss
-         *  snapping turned out to be a different, unrelated bug: every chunk's
-         *  own duration was always correct in isolation, which is exactly what
-         *  this tolerance checks -- the composite streamed byte sequence's
-         *  timeline was not, which nothing here can see. See
-         *  patchFragmentTimestamps' doc comment for the actual mechanism and
-         *  the fix; tightening this constant was never going to touch it.) */
+        /** How far the finished file may *overrun* the requested duration before
+         *  it's rejected. Deliberately looser than [CHUNK_DURATION_TOLERANCE_MS],
+         *  and the asymmetry is the point: shortfall is the truncation bug the
+         *  check exists for, while overrun has legitimate sources -- an AAC encode
+         *  ending on a whole packet, an encoder's padding, clip-end rounding. A
+         *  false rejection is maximally expensive (it throws away a finished
+         *  transcode), so the loose side stays loose. Don't "fix" this back to
+         *  symmetric. */
         private const val CHUNK_OVERRUN_TOLERANCE_MS = 1000L
 
         /** Length of the fragments the one whole-range audio encode is written in
-         *  (see [startAudioLeg]), in microseconds. Audio can't ride
+         *  (see [transcodeAudioTrack]), in microseconds. Audio can't ride
          *  `frag_keyframe` the way video does -- every AAC packet is a sync
          *  sample, so that would cut a fragment per 21ms packet and spend a
          *  few percent of the file on moof headers -- hence an explicit
          *  duration. 2s costs ~2% container overhead and is also the
          *  granularity at which the readable prefix of a still-encoding file
-         *  grows: negligible next to how long a chunk takes to encode. */
+         *  grows, which is what the merge works from. */
         private const val AUDIO_FRAGMENT_DURATION_US = 2_000_000L
 
-        /** How often [tailAudioFragments] looks for newly finished fragments in
-         *  the audio encode's output. Pure latency on how soon a chunk waiting
-         *  for its audio can proceed; the work per poll is a handful of box
-         *  headers, so this is cheap enough to keep short. */
-        private const val AUDIO_TAIL_POLL_MS = 200L
-
-        /** Seconds shaved off an audio slice's `-ss`, so it lands just *before*
-         *  the packet it wants rather than on it. A packet's presentation time
-         *  is an exact multiple of the packet duration but `-ss` is a decimal:
-         *  printed to six places it can round to either side of the true value,
-         *  and rounding up would silently drop the wanted packet and shift the
-         *  whole slice by 21ms. Two microseconds is far below half a packet (so
-         *  the previous packet is never picked up) and far above the rounding
-         *  of a six-place decimal (so the wanted one never is dropped). */
-        private const val AUDIO_SLICE_SEEK_EPSILON_S = 0.000002
-
-        /** Whether the audio keeps its encoder's priming packet.
-         *
-         *  An AAC encoder emits one leading packet that carries no audio of
-         *  its own: it is the overlap partner of the first real packet (AAC is
-         *  a lapped transform, and a block is only reconstructed from two
-         *  consecutive packets). The mp4 way of hiding it is an edit list on
-         *  the audio track that starts playback one priming-length into the
-         *  media, so the packet sits at negative time and a player skips it.
-         *
-         *  True keeps the packet and carries that declaration through the mux
-         *  ([remuxVideoAndAudio], [concatChunksFragmented]), so nothing in the
-         *  timeline moves -- video is exactly where the source puts it -- and
-         *  the first real block decodes exactly as it does in the single encode
-         *  (measured: with the packet dropped instead, that first 21ms block
-         *  came out around -3dB against the signal on a loud start, effectively
-         *  a different sound). The cost is borne only by a player that ignores
-         *  edit lists: it would play the priming block and run its audio 21ms
-         *  late.
-         *
-         *  False drops the packet when slicing: no declaration needed anywhere,
-         *  at the price of that damaged block. */
-        private const val AUDIO_KEEP_PRIMING = true
-
-        /** How far the assembled file's duration may sit from the requested
+        /** How far the finished file's duration may sit from the requested
          *  total before [verifyAssembledDuration] warns (it never fails on this
-         *  -- see its own thresholds). Simulating the full pipeline on real
-         *  ffmpeg output puts a clean assembly within ~8ms: the final audio
-         *  packet keeps its full 1024-sample duration where the chunk's own had
-         *  been cut to the exact sample count. 100ms is a couple of frames, so
-         *  it's well clear of that and still trips at the fifth chunk of a
-         *  21ms-per-chunk error rather than the forty-eighth. */
+         *  -- see its own thresholds). A clean merge lands within a few ms: the
+         *  final audio packet keeps its full 1024-sample duration. 100ms is a
+         *  couple of frames, so it is well clear of that and still flags real
+         *  drift. */
         private const val ASSEMBLED_DRIFT_WARN_MS = 100L
 
-        /** How far a hw_ffmpeg chunk's actual first frame (per -copyts, see
-         *  [verifyChunkStartAlignment]) may land from the seek target before
-         *  it's treated as landing on the wrong keyframe rather than shipped.
-         *  A *duration*-only check (the two tolerances above) cannot catch
-         *  this class of failure: a chunk that starts early or late but is
-         *  still cut to its full nominal length reports the requested
-         *  duration while covering the wrong window, which is what actually
-         *  produces overlapping or gapped video at a seam once
-         *  [concatChunks] stitches chunks together. This has to sit above the
-         *  encoder's own B-frame reorder delay (confirmed directly at ~83ms
-         *  for a representative software encoder on a zero-seek chunk, i.e.
-         *  present even with nothing wrong) and below the smallest plausible wrong-
-         *  keyframe error (at least one whole missed GOP -- see
-         *  [GOP_TARGET_SECONDS] -- so at least seconds, not tens of ms, for
-         *  any realistic source). 500ms clears both with room to spare. */
-        private const val CHUNK_START_ALIGNMENT_TOLERANCE_MS = 500L
-
-        /** Same idea as [CHUNK_START_ALIGNMENT_TOLERANCE_MS], for the safe
-         *  path's own clip start -- see [verifySafePathStartAlignment]. Unlike
-         *  hw_ffmpeg's -copyts leg, a Transformer clip's own output is
-         *  zero-based (its new file's own timeline, not the source's), so this
-         *  is checked against ~0 rather than against offsetMs, but it's
-         *  guarding against the same class of failure and needs to clear the
-         *  same encoder-reorder-delay noise floor, so it reuses the same
-         *  value. */
-        private const val SAFE_PATH_START_ALIGNMENT_TOLERANCE_MS = 500L
-
-        /** Shortfall tolerance for the *last* chunk of a range only. The range
-         *  end comes from library-scan metadata; when the real file is slightly
-         *  shorter, the final chunk legitimately requests past EOF and comes back
-         *  short. Rejecting it discards every other chunk's work, so the final
-         *  chunk gets slack the rest don't. [resolveSourceDurationMs] removes the
-         *  cause for local sources; this covers the piped ones it can't. */
+        /** Shortfall tolerance for the end of the range. The range end comes from
+         *  library-scan metadata; when the real file is slightly shorter, an encode
+         *  that runs to the real end legitimately comes back short of it.
+         *  Rejecting that would throw away a finished transcode, so the end of the
+         *  range gets slack the rest of the file doesn't: a leg's coverage and the
+         *  finished file's duration are both judged against it.
+         *  [resolveSourceDurationMs] removes the cause for local sources; this
+         *  covers the piped ones it can't. */
         private const val FINAL_CHUNK_TOLERANCE_MS = 2000L
 
-        /** A seam whose video gap or overlap exceeds this is logged as a
-         *  warning by [concatChunksFragmented]: a held or doubled frame the
-         *  eye can catch -- about two frames at 30fps. Below it the
-         *  per-seam line is still logged, just not flagged; a clip that
-         *  comes out a frame short or long is normal quantisation. */
-        private const val SEAM_VIDEO_GAP_WARN_MS = 60L
+        /** How long [FragmentAssembler] waits, once both encodes have started,
+         *  before it writes anything. The encoders get a head start, so the
+         *  first portion handed to the output (or to a renderer) is a real run
+         *  of media rather than a fragment or two; after that, each portion is
+         *  simply whatever both legs have finished since the one before.
+         *
+         *  Wall-clock, not media time: a slow encoder must not be able to hold
+         *  the first byte back indefinitely. It ends early when both legs have
+         *  finished or one has failed, so a short clip is not made to wait out
+         *  the rest of it. */
+        private const val ASSEMBLER_STARTUP_WAIT_MS = 10_000L
+
+        /** How much encoded media a PIPED leg may have queued, unserved, before
+         *  its reader stops reading. A pipe holds about 64 KB, so from then on
+         *  the encoder blocks in its own write call: this is what paces the
+         *  encoders to whoever consumes the stream, and what bounds both the
+         *  memory held (about one GOP-sized fragment per two seconds queued)
+         *  and the work wasted when a viewer pauses or leaves. Should comfortably
+         *  exceed [ASSEMBLER_STARTUP_WAIT_MS], or the head start is wasted. */
+        private const val STREAM_LEAD_MS = 20_000L
+
+        /** Permissions of a leg's FIFO: owner read/write (octal 0600). */
+        private const val FIFO_MODE = 384
+
+        /** Fragment length of the Safe Path's whole-range export. Media3's
+         *  fragmented muxer cuts a fragment once this much has elapsed (at a
+         *  sync sample, for video), so it is also the granularity at which the
+         *  readable prefix of the still-running export grows. Same figure as
+         *  the audio leg's ([AUDIO_FRAGMENT_DURATION_US]). */
+        private const val SAFE_PATH_FRAGMENT_DURATION_MS = 2_000L
+
+        /** No growth in the video leg's output for this long and its encode is
+         *  killed as wedged. A fragmented writer grows in whole fragments (about
+         *  one GOP), not byte by byte, so this has to sit well above the encode
+         *  time of a GOP on the slowest device worth supporting (the 30 s this
+         *  replaces was sized for a file that grew continuously). Without
+         *  per-chunk budgets this and [Budget.forVideo] are all that stop a hung
+         *  encoder: the first within a minute and a half, the second only after
+         *  hours. Time a piped leg spends held back on purpose does not count. */
+        private const val VIDEO_LEG_STALL_ABORT_MS = 90_000L
+
+        /** How long a Transformer export may go without growing before the
+         *  threads it is made of are dumped to the log -- once per export, well
+         *  inside [VIDEO_LEG_STALL_ABORT_MS] so the dump is taken while the
+         *  export is still stuck, not after it has been torn down. */
+        private const val STALL_DUMP_AFTER_MS = 20_000L
+
+        /** The fastest a FILE video leg's Transformer export may run, in seconds
+         *  of media per second of wall clock; 0 lifts the limit (the default).
+         *  Enforced by [ExportThrottle], in the muxer wrapper.
+         *
+         *  Do not use. Tried at 2x on a Pixel 7 on 2026-10-12, it did not slow
+         *  the decoder, which went on running ~10x ahead; the pipeline shed
+         *  most of its frames instead (a 30 fps source came out at 2-9 fps),
+         *  and the 8-bit export still wedged, on a cool device at a sixth of
+         *  the load. Blocking the muxer is not backpressure on this pipeline.
+         *  Kept so the experiment can be repeated. */
+        private const val SAFE_PATH_FILE_MAX_SPEED = 0.0
+
+        /** How many frames the Safe Path's Transformer may have in the video
+         *  encoder at once; 0 leaves Media3's default, which is no limit.
+         *
+         *  Why: the 2026-10-12 telemetry shows the process holding ~4,000 file
+         *  descriptors, and the system ~2.3 GB poorer, within six seconds of an
+         *  export starting -- the same for 8-bit and 10-bit sources -- and the
+         *  contiguous-memory pool (CmaFree) at 0 of 988 MB from then on. The
+         *  decoder runs ~10x ahead of the encoder and nothing pushes back, so
+         *  frames pile up in the encoder's queue until memory runs out. In all
+         *  three stalls so far the decoder's input stopped first, and the GL
+         *  thread was then found in glClear, most likely waiting for a buffer
+         *  to be allocated for the encoder's input surface -- which an
+         *  exhausted pool cannot give it. A bound on frames in flight is the
+         *  direct test: if this is the cause, fds and CmaFree stay flat and
+         *  the stall goes.
+         *
+         *  Applied by reflection ([applyMaxFramesInEncoder]): the setter is
+         *  Media3's experimental Transformer.Builder.experimentalSetMaxFramesInEncoder
+         *  and the version in use may not have it. The log says which. 16 is
+         *  generous -- an encoder's own lookahead is a handful of frames. */
+        private const val SAFE_PATH_MAX_FRAMES_IN_ENCODER = 16
+
+        /** The telemetry reads one file per dma-buf descriptor to total their
+         *  size; that is done on every this-many'th sample. */
+        private const val EXPORT_TELEMETRY_DEEP_EVERY = 5
+
+        /** How often [launchExportTelemetry] writes its line. */
+        private const val EXPORT_TELEMETRY_INTERVAL_MS = 2_000L
+
+        /** How far the first audible audio sample may sit from the first video
+         *  frame in the finished file before [verifyAssembledStart] warns:
+         *  about one frame. Both legs start at zero by construction, so more
+         *  than this means the video leg's first frame is not at the start of
+         *  its range (an encoder's B-frame reorder delay, say). Rejection is at
+         *  [AV_SYNC_TOLERANCE_MS]. */
+        private const val AV_START_OFFSET_WARN_MS = 40L
+
+        /** A gap between consecutive video frames counts as a held frame when it
+         *  exceeds this many times the typical frame interval. */
+        private const val VIDEO_CONTINUITY_GAP_FACTOR = 1.5
+
+        /** Packets read from the start of each stream by [verifyAssembledStart]:
+         *  enough to see past a B-frame reorder or an AAC priming packet to the
+         *  first one a viewer would see or hear. */
+        private const val START_PROBE_PACKETS = 16
 
         /** Dimension alignment some MediaCodec encoders require. This is where
          *  the long-standing 1088 comes from -- 1080 rounded up to a multiple of
@@ -258,9 +273,9 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
 
         /** GOP target in seconds, converted against the real source frame rate
          *  by [encoderTuningArgs]. The old fixed `-g 24` was a 1-second GOP at
-         *  the equally fixed 24fps; ~2s is a bitrate win at the same quality and
-         *  costs nothing at the chunk seams, since ffmpeg emits an IDR at the
-         *  start of every chunk encode regardless of `-g`. */
+         *  the equally fixed 24fps; ~2s is a bitrate win at the same quality, and
+         *  it is also the length of a video fragment: the video leg cuts one per
+         *  keyframe, so this is how coarsely its output becomes readable. */
         private const val GOP_TARGET_SECONDS = 2.0
 
         /** Frame rate assumed when the real one can't be determined (piped
@@ -272,10 +287,11 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
          *  cap genuinely high-rate sources. */
         private const val MAX_OUTPUT_FRAME_RATE_FPS = 60
 
-        /** Max allowed difference between a muxed chunk's video-track duration and
-         *  its audio-track duration. Catches drift between the two independently
-         *  produced legs that verifyChunkDuration (container-level only) can miss --
-         *  see [verifyMuxedAvSync]. */
+        /** Max allowed difference between the finished file's video-track and
+         *  audio-track durations, and between where its audio and its video
+         *  start. Catches drift between the two independently produced legs that
+         *  a container-level duration check can miss -- see [verifyMuxedAvSync]
+         *  and [verifyAssembledStart]. */
         private const val AV_SYNC_TOLERANCE_MS = 200L
 
         /** How far over the requested output box an encoder may legitimately land
@@ -283,12 +299,15 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
          *  step. Encoders are free to align dimensions up (and Media3's
          *  DefaultEncoderFactory fallback will adjust a requested resolution to
          *  something the device actually supports), so a few pixels over is
-         *  expected and only worth logging. A rejection here costs a chunk retry
-         *  and then the whole transcode, so the check only fires on a miss big
+         *  expected and only worth logging. A rejection here fails the whole
+         *  transcode, so the check only fires on a miss big
          *  enough to mean the scale request was ignored outright. */
         private const val ENCODER_ALIGNMENT_SLACK_PX = ENCODER_DIMENSION_ALIGNMENT_PX
 
         const val DEFAULT_TIMEOUT_S = 60L
+
+        /** Kept for callers that still refer to it; the controller no longer
+         *  encodes in chunks, so nothing in here reads it. */
         const val DEFAULT_CHUNK_DURATION_MS = 30_000L
 
         /** How long [runProcessCapture] waits for its stdout/stderr readers to
@@ -302,13 +321,6 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
          *  codecs. See [cancelAndAwait]. */
         private const val TRANSFORMER_CANCEL_TIMEOUT_MS = 5_000L
 
-        /** Consecutive safe-path failures that look like codec-pool exhaustion
-         *  before [transcodeInChunks] stops retrying. Retrying into an exhausted
-         *  codec pool cannot succeed -- every attempt fails identically until the
-         *  process restarts -- so the retry budget is better spent failing fast
-         *  and loudly. */
-        private const val CODEC_EXHAUSTION_FAILURE_LIMIT = 2
-
         /** How long the *streaming* path will wait for the hardware probe before
          *  proceeding on the safe path. A DLNA renderer typically abandons a
          *  connection that produces no bytes within 5-15s, so an unbounded wait on
@@ -316,50 +328,10 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
          *  file-save path has no such deadline and awaits properly. */
         private const val HW_PROBE_STREAM_WAIT_MS = 2_000L
 
-        /** No byte growth in the safe path's output for this long and the export is
-         *  treated as wedged rather than slow. Sized well clear of a slow first
-         *  keyframe. This is the counterweight to [Budget]'s generous budgets: a
-         *  stall surfaces in seconds while a merely-slow device still gets the time
-         *  it needs. */
-        private const val STALL_ABORT_MS = 30_000L
-
         /** Metadata probes read a container header; they don't scale with content
          *  length. The keyframe probe does walk the file, hence its own budget. */
         private const val PROBE_TIMEOUT_MS = 15_000L
         private const val KEYFRAME_PROBE_TIMEOUT_MS = 60_000L
-
-        /** The keyframe probe's budget on the *streaming* path only, where it
-         *  sits between the request arriving and the first byte going out.
-         *  [KEYFRAME_PROBE_TIMEOUT_MS] plus [KEYFRAME_EXTRACTOR_TIMEOUT_MS] is up
-         *  to 80 seconds of probing in front of a renderer that abandons a silent
-         *  connection in 5-15, so the streaming path trades keyframe-snapped
-         *  boundaries for getting bytes moving: whatever a cached index or a
-         *  three-second look can supply, else fixed-time chunks.
-         *
-         *  That trade has a cost -- less precise chunk boundaries than a real
-         *  keyframe index gives, and [CHUNK_OVERRUN_TOLERANCE_MS] exists partly
-         *  for that -- but it is not the seam stutter every chunk boundary shows
-         *  on this path. That turned out to be unconditional: present even with
-         *  boundaries snapped exactly onto real keyframes, because it's a
-         *  property of independently-invoked chunks' own reset-to-zero output
-         *  timelines, not of seek precision. See patchFragmentTimestamps' doc
-         *  comment for the mechanism and the fix -- fixed-time chunks were never
-         *  the cause, so getting the keyframe probe to succeed more often here
-         *  would not have touched it either. File-save mode has no such deadline
-         *  and keeps the full budget. */
-        private const val KEYFRAME_PROBE_STREAM_BUDGET_MS = 3_000L
-
-        /** Most chunks a file-save transcode will attempt over a `pipe:0` source
-         *  before refusing outright. The pipe is forward-only, so chunk n decodes
-         *  and discards everything before its own start offset: cost is quadratic
-         *  in chunk count, and a 90-minute film at [DEFAULT_CHUNK_DURATION_MS]
-         *  is ~180 chunks, i.e. ~180 full reads of the source. Twenty chunks is
-         *  ten minutes of content -- tolerable to re-read, and well clear of
-         *  anything a user would sit through unknowingly.
-         *
-         *  Only file-save mode aborts. Streaming delivers progressively, so a
-         *  slow start is visible rather than silent. */
-        private const val PIPE_MAX_CHUNKS_BEFORE_ABORT = 20
 
         /** How long a [diagnosticSnapshot] stays fresh. The snapshot stats the
          *  filesystem and hits two system services, and Kotlin evaluates string
@@ -381,7 +353,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
          * doing 4K->1080p on the safe path runs well below that, so it blew the
          * budget every time, retried identically, and aborted -- a device being
          * slow was indistinguishable from a device being broken. These factors are
-         * deliberately generous for that reason; [STALL_ABORT_MS] is what
+         * deliberately generous for that reason; [VIDEO_LEG_STALL_ABORT_MS] is what
          * distinguishes the two.
          *
          * Self-contained by design: no reference to the outer constants, so the
@@ -401,7 +373,11 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                 else -> 8.0
             }
 
-            fun forChunk(durationMs: Long, strategy: String, resolution: Constants.Transcoder.Resolution): Long =
+            /** The one video encode that spans the whole range. There is no
+             *  per-chunk budget any more, so this is only the outer bound for a
+             *  wedged process; [VIDEO_LEG_STALL_ABORT_MS] is what catches a hung
+             *  one quickly. */
+            fun forVideo(durationMs: Long, strategy: String, resolution: Constants.Transcoder.Resolution): Long =
                 (durationMs * rtFactor(strategy, resolution)).toLong().coerceAtLeast(MIN_CHUNK_BUDGET_MS)
 
             /** Copy-only work (concat, remux): budget by bytes at a pessimistic
@@ -411,14 +387,13 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                 (bytes / floorBytesPerSec * 1000).coerceIn(MIN_COPY_BUDGET_MS, MAX_COPY_BUDGET_MS)
 
             /** The one audio encode that spans the whole range (see
-             *  [startAudioLeg]). Cheap per second of content, but it still decodes
-             *  the source. It runs alongside the video chunks for as long as they
-             *  take, not in a burst of its own, so the bar is "no slower than
-             *  half real time" -- far below what any device manages, but
+             *  [transcodeAudioTrack]). Cheap per second of content, but it still
+             *  decodes the source. It runs alongside the video encode for as long
+             *  as that takes, not in a burst of its own, so the bar is "no slower
+             *  than half real time" -- far below what any device manages, but
              *  generous enough that a long film on a loaded phone isn't killed
-             *  for being slow, which is what the old 10-minute cap (sized for
-             *  one chunk's worth of audio) would have done to it. The cap is
-             *  there for a wedged process, not a slow one. */
+             *  for being slow. The cap is there for a wedged process, not a slow
+             *  one. */
             fun forAudio(durationMs: Long): Long =
                 (durationMs / 2).coerceIn(MIN_AUDIO_BUDGET_MS, MAX_AUDIO_BUDGET_MS)
         }
@@ -561,12 +536,12 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      *  Context.cacheDir is non-null. */
     private val workDir: File by lazy { File(context.cacheDir, "transcode").apply { mkdirs() } }
 
-    /** Home for everything else this controller writes: chunks, the concat
-     *  list, safe-path legs, the pre-publish output -- in-progress work that
+    /** Home for everything else this controller writes: the encoders' leg
+     *  files and pipes, the merged file, the pre-publish output -- in-progress work that
      *  is small but expensive to redo, not disposable the way a source mirror
      *  is. `cacheDir` is reclaimable by the OS under storage pressure with no
-     *  warning and no regard for whether a write is in flight; losing 50
-     *  already-encoded chunks moments before [concatChunks] runs loses the
+     *  warning and no regard for whether a write is in flight; losing
+     *  a nearly finished encode moments before the final remux runs loses the
      *  whole job, not just a mirror copy that [resolveFfmpegInputPath] would
      *  cheerfully redo. `noBackupFilesDir` is internal app storage (not
      *  reclaimed under pressure, not swept into auto-backup either, which
@@ -638,9 +613,10 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             .asCoroutineDispatcher()
 
     /** Consecutive safe-path failures that looked like codec-pool exhaustion.
-     *  Reset by any successful video leg. Read by [transcodeInChunks]: once the
-     *  device's global codec budget is gone, every subsequent attempt fails
-     *  identically until the process restarts, so retrying is pure cost. */
+     *  Reset by any successful video leg. Counted and logged by the Safe Path: once
+     *  the device's global codec budget is gone, every attempt fails identically
+     *  until the process restarts. (A failed run is no longer retried on the same
+     *  encoder, so nothing reads it to stop one.) */
     private val consecutiveCodecAllocationFailures = AtomicInteger(0)
 
     /** Everything a single ffprobe pass over a file yields that this class
@@ -686,20 +662,6 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
     /** Result of [probedHasAudioTrack] per item.id -- the fallback path only,
      *  used when the scan recorded no audio metadata for an item. */
     private val probedAudioPresence = ConcurrentHashMap<String, Boolean>()
-
-    /** Keyframe timestamps per item.id -- see [probeKeyframeTimestampsMs].
-     *
-     *  The index is a property of the file and does not change, yet it was
-     *  recomputed for every HTTP request, and a DLNA renderer routinely opens
-     *  two or three per item (probe, playback, seek). This is the cheapest and
-     *  highest-value item in the streaming-latency work: the second request for
-     *  an item pays nothing.
-     *
-     *  Successful probes only. A probe that found nothing over `pipe:0` can
-     *  succeed later against a mirror some other call has since paid for, so
-     *  caching the miss would pin an item to fixed-time chunks for the
-     *  controller's whole life. */
-    private val keyframeIndex = ConcurrentHashMap<String, List<Long>>()
 
     /** Device/binary transcode capabilities. Null until the init check completes. */
     @Volatile
@@ -1116,10 +1078,10 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * file whose channel count was already established at scan time and
      * doesn't change mid-file.
      *
-     * Deliberately pure -- no logging here. This is called once per chunk
-     * (see [transcodeViaHardwareFfmpeg] and [transcodeAudioTrack]) as well as
-     * once per request (see [transcodeMediaFile]), so a downmix warning
-     * placed here would fire once per chunk instead of once per transcode.
+     * Deliberately pure -- no logging here. This is called more than once per
+     * transcode (see [transcodeAudioTrack]) as well as once per request (see
+     * [transcodeMediaFile]), so a downmix warning placed here would fire
+     * repeatedly instead of once per transcode.
      * [transcodeMediaFile]'s single top-level call is where that's logged,
      * once, for the whole request (D23r.3).
      */
@@ -1175,8 +1137,8 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * The pad is always emitted, even when [box] is already aligned, because
      * `decrease` can round a fitted dimension to an odd number that a 4:2:0
      * encoder would reject -- padding to a fixed aligned target makes the
-     * output dimensions deterministic for a given box, which also keeps every
-     * chunk of one item identical for [concatChunks]' stream copy. When no
+     * output dimensions deterministic for a given box, which also keeps what the
+     * hardware and Transformer encoders produce the same size. When no
      * padding is needed it's a no-op.
      *
      * Deliberately limited to filters that predate ffmpeg 4.4: no
@@ -1274,10 +1236,9 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * paths fell out of agreement the moment each was fixed independently: the
      * ffmpeg chain padded to alignment and Presentation didn't, so a 1920x804
      * source came out 1920x816 through one path and 1920x804 through the other.
-     * [transcodeChunk] falls back from hardware to safe path *per chunk*, so a
-     * single file could contain both, and [concatChunks] stream-copies them into
-     * one MP4 -- a dimension change mid-stream that the concat demuxer cannot
-     * reconcile.
+     * A run that falls back from hardware to the Safe Path starts again on the
+     * other encoder, and the two have to agree on the output size for what the
+     * viewer gets not to depend on which of them ran.
      *
      * Null means the scan's resolution string was unparseable, which callers
      * read as "don't make a geometry decision for this item" -- unlike
@@ -1405,6 +1366,12 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         verbosity: String = "error"
     ): HwProbeOutcome {
         return HwProbeOutcome.FAIL
+
+
+
+
+
+
         if (stdinSource == null && !File(inputPath).exists()) return HwProbeOutcome.FAIL
 
         // Costs one extra full pass over the source ahead of the real probe
@@ -1505,7 +1472,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         // ignore the request, some fail encoder configuration outright, and this
         // file already has a history of encoder-init failures. B-frames also
         // introduce reordering and a non-trivial DTS/PTS relationship exactly at
-        // the fragmented-MP4 seams that concatChunks reassembles and
+        // the fragmented-MP4 fragments that the assembler merges and
         // verifyMuxedAvSync checks to 200ms. Revisiting it needs a device matrix,
         // not a flag flip.
         //
@@ -1549,10 +1516,9 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         val audioLayout = resolveItemChannelLayout(item, audioTrackIndex)
         val audioBitrateBps = resolveAudioBitrate(audioLayout)
         // Downmix warning lives here, not inside resolveItemChannelLayout: this
-        // is the one call to it per transcode request. transcodeViaHardwareFfmpeg
-        // calls it again per chunk, and transcodeAudioTrack once for the whole
-        // range, with the same result; logging there used to turn one warning
-        // into one per chunk (D23r.3).
+        // is the one call to it per transcode request. The legs and
+        // transcodeAudioTrack call it again, with the same result; logging
+        // there used to turn one warning into many (D23r.3).
         resolveTrackChannelCount(item, audioTrackIndex)?.let { channelCount ->
             if (channelCount !in setOf(1, 2, 6)) {
                 Log.w(TAG, "Downmixing '${item.name}' audio track $audioTrackIndex from ${channelCount}ch to stereo (unsupported layout)")
@@ -1582,7 +1548,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
 
         val strategy = when {
             hwReady -> "hw_ffmpeg"
-            is4k -> "hybrid" //full_media3" //transcodeViaFullMedia3Path
+            is4k -> "hybrid" // (a whole-file Media3 path was tried here once)
             isLegacyVideo -> "hybrid"
             hasDtsAudio -> "hybrid"
             else -> "hybrid"
@@ -1602,115 +1568,42 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
 
             // One id per stream session. A DLNA renderer routinely opens two or
             // three concurrent connections against one item (probe, playback,
-            // seek); the old fixed "live_chunk_<id>.mp4" meant two sessions wrote
-            // the same path while two reader loops read from it.
+            // seek); every pipe and temp file a session makes carries its id, so
+            // two sessions never share one.
             val sessionId = UUID.randomUUID().toString().take(8)
-            // Bounded and mirror-free, unlike file-save mode below: everything
-            // here happens before the first byte reaches the renderer, and a
-            // renderer that has waited 15s for a response is already gone. See
-            // KEYFRAME_PROBE_STREAM_BUDGET_MS for what that trades away.
-            val chunkBoundaries = computeChunkBoundaries(
-                item, DEFAULT_CHUNK_DURATION_MS, startTimeMs, null,
-                keyframeBudgetMs = KEYFRAME_PROBE_STREAM_BUDGET_MS,
-                allowMirror = false
-            )
-            var streamedChunks = 0
-            // Every chunk after the first is an independently-invoked process whose
-            // own output resets to a fresh internal timeline near zero -- read the
-            // real per-track timescales once, from chunk 0's still-present moov,
-            // while there's still a moov to read (chunk 1 overwrites this same
-            // file). Empty until then; patchFragmentTimestamps no-ops on empty.
-            // See patchFragmentTimestamps' doc comment for why this exists.
-            var chunkTrackTimescales: Map<Int, Int> = emptyMap()
-            // Which of those tracks is the audio, read from the same moov: audio
-            // is placed on its own packet grid, the other track by the chunk's
-            // start (chunkPlacementTicks).
-            var chunkAudioTrackId: Int? = null
+            val totalDurationMs = resolveSourceDurationMs(item) - startTimeMs
+            if (totalDurationMs <= 0L) {
+                Log.e(TAG, "transcodeMediaFile: nothing to stream for '${item.name}' (startTimeMs=$startTimeMs)")
+                return false
+            }
 
+            // Streaming is momentary and saves nothing: the video and audio encoders write
+            // fragmented mp4 into pipes, the assembler merges what they produce and serves it,
+            // and whatever has been served is dropped. A client that reads slowly (or pauses)
+            // holds the encoders back through the pipes rather than letting them run ahead.
+            var streamedOk = false
             responder.invoke(status, "video/mp4") { out ->
-                val chunkFile = File(workDir, "live_${item.id}_$sessionId.mp4")
-                try {
-                    coroutineScope {
-                        val firstStartMs = chunkBoundaries.firstOrNull()?.startMs ?: startTimeMs
-                        // One audio encode for everything the session will stream,
-                        // started now so it runs while chunk 0's video does: the
-                        // chunks below take their audio from it as soon as the part
-                        // they need has been written, long before the rest has been.
-                        // Replaces an audio encode (plus priming and tail trims) per
-                        // chunk, which put an encoder priming packet at every seam.
-                        // Cancelled on the way out, whether the stream finished, a
-                        // chunk failed or the client went away -- nobody needs the
-                        // remaining audio after that, and encoding a whole film's
-                        // worth for a viewer who stopped after a minute would be
-                        // real wasted work on a phone.
-                        val audioLeg = chunkBoundaries.lastOrNull()?.let { last ->
-                            startAudioLeg(
-                                this, item, rangeStartMs = firstStartMs,
-                                rangeDurationMs = last.startMs + last.durationMs - firstStartMs,
-                                targetAudioCodec = targetAudioCodec, audioBitrateBps = audioBitrateBps,
-                                audioTrackIndex = audioTrackIndex, sessionId = sessionId
-                            )
-                        }
-                        try {
-                            for ((index, boundary) in chunkBoundaries.withIndex()) {
-                                // A disconnected client should stop the encoder, not let it
-                                // run to completion into a dead socket -- real wasted encode
-                                // time on a server where users seek and reconnect often.
-                                currentCoroutineContext().ensureActive()
-                                val (chunkStartMs, chunkDurMs, startsAtVerifiedKeyframe) = boundary
-                                val chunkTimeoutMs = Budget.forChunk(chunkDurMs, strategy, resolution)
-                                val outcome = transcodeChunk(
-                                    item, chunkStartMs, chunkDurMs, targetVideoCodec, resolution, videoBitrateKbps, audioLeg, chunkFile, chunkTimeoutMs, strategy, fragmented = true,
-                                    durationToleranceMs = if (index == chunkBoundaries.lastIndex) FINAL_CHUNK_TOLERANCE_MS else CHUNK_DURATION_TOLERANCE_MS,
-                                    sessionId = sessionId, startsAtVerifiedKeyframe = startsAtVerifiedKeyframe
-                                )
-                                if (outcome != ChunkOutcome.Success) {
-                                    Log.e(TAG, "transcodeMediaFile: chunk $index $outcome for '${item.name}' [${chunkStartMs}ms +${chunkDurMs}ms) -- ending stream early")
-                                    break
-                                }
-                                streamedChunks++
-                                if (index == 0) {
-                                    chunkTrackTimescales = readTrackTimescales(chunkFile)
-                                    chunkAudioTrackId = readAudioTrackId(chunkFile)
-                                } else if (chunkTrackTimescales.isNotEmpty()) {
-                                    // Relative to *this session's* first chunk, not to chunkStartMs
-                                    // itself -- see patchFragmentTimestamps' doc comment for why the
-                                    // distinction matters on every request that starts mid-file.
-                                    val placement = chunkPlacementTicks(
-                                        chunkTrackTimescales, chunkAudioTrackId, audioLeg?.progress?.value?.layout?.timescale,
-                                        chunkStartMs - firstStartMs, audioFirstTickFor(audioLeg, chunkStartMs, chunkDurMs)
-                                    )
-                                    patchFragmentTimestamps(chunkFile, placement)
-                                }
-                                val skipOffset = if (index == 0) 0L else findFirstMoofOffset(chunkFile)
-                                RandomAccessFile(chunkFile, "r").use { raf ->
-                                    raf.seek(skipOffset)
-                                    val buf = ByteArray(65536)
-                                    while (true) {
-                                        val n = raf.read(buf)
-                                        if (n == -1) break
-                                        out.write(buf, 0, n)
-                                    }
-                                }
-                                out.flush()
-                                Log.d(TAG, "transcodeMediaFile: streamed chunk $index/${chunkBoundaries.size} for '${item.name}' [${chunkStartMs}ms +${chunkDurMs}ms)")
-                                if (index > 0) {
-                                    Log.i(TAG, "SEAM #$index/${chunkBoundaries.size - 1} (stream) '${item.name}' at ${formatTimestamp(chunkStartMs - firstStartMs)} into this stream (src ${formatTimestamp(chunkStartMs)})")
-                                }
-                            }
-                        } finally {
-                            audioLeg?.cancel()
-                        }
+                for ((attempt, plan) in legPlans(strategy, streaming = true).withIndex()) {
+                    currentCoroutineContext().ensureActive()
+                    if (attempt > 0) Log.w(TAG, "transcodeMediaFile: '${item.name}' -- nothing had been sent yet; starting again on [$plan]")
+                    val run = runLegsOnce(
+                        item, plan, targetVideoCodec, resolution, videoBitrateKbps,
+                        targetAudioCodec, audioBitrateBps, audioTrackIndex,
+                        startTimeMs, null, totalDurationMs, sessionId, out
+                    )
+                    val assembly = run.assembly
+                    if (assembly.ok) {
+                        Log.d(TAG, "transcodeMediaFile: streamed '${item.name}' via [$plan] -- ${assembly.fragmentsWritten} fragments, ${assembly.bytesWritten / 1024} KiB, video ${assembly.videoEndMs}ms, audio ${assembly.audioEndMs}ms, start offset ${assembly.startOffsetMs}ms")
+                        streamedOk = true
+                        break
                     }
-                } finally {
-                    chunkFile.delete()
-                    audioLegRawFile(item, sessionId).delete()
+                    Log.e(TAG, "transcodeMediaFile: '${item.name}' [$plan] failed -- ${assembly.reason} (video reached ${assembly.videoEndMs}ms, audio ${assembly.audioEndMs}ms, of ${totalDurationMs}ms; ${assembly.bytesWritten} bytes sent)")
+                    // Once anything has gone out the stream cannot be restarted on another plan (the
+                    // client already holds this one's moov), and a failing sink means nobody is listening.
+                    if (assembly.bytesWritten > 0L || run.sinkFailed) break
                 }
             }
-            // Used to be an unconditional `return true`: if chunk 0 failed, the
-            // loop above broke immediately, the responder finished having
-            // written nothing, and this reported success anyway.
-            return streamedChunks > 0 && streamedChunks == chunkBoundaries.size
+            return streamedOk
         } else {
             // File mode: Save to source directory.
             val outputFile = File(durableWorkDir, "transcoding_${item.id}.mp4")
@@ -1718,1281 +1611,34 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
 
             // When saving to file, we generally transcode the whole file from start to finish
             // unless a specific seek was intended. For the unified test, we use startTimeMs=0.
-            val success = transcodeInChunks(item, targetVideoCodec, resolution, videoBitrateKbps, targetAudioCodec, audioBitrateBps, audioTrackIndex, outputFile, startTimeMs, null, DEFAULT_CHUNK_DURATION_MS, strategy)
+            val success = transcodeSinglePass(item, targetVideoCodec, resolution, videoBitrateKbps, targetAudioCodec, audioBitrateBps, audioTrackIndex, outputFile, startTimeMs, null, strategy)
             var finalSuccess = success
-            if (success) {
-                val published = publishToSourceDirectory(item, outputFile)
-                if (published != null) {
-                    Log.d(TAG, "Transcode finished. File preserved at: $published")
-                } else {
-                    Log.e(TAG, "Transcode succeeded but publishing failed.")
-                    finalSuccess = false
-                }
-            }
-
-            if (outputFile.exists()) outputFile.delete()
-            return finalSuccess
-        }
-    }
-
-    /**
-     * Transcodes a single [chunkStartMs, chunkStartMs + chunkDurationMs)
-     * window of [item] into [outputFile], and verifies the result actually
-     * covers that duration before accepting it.
-     *
-     * Prefers hw_ffmpeg regardless of the whole-file useHardwareFfmpegPipeline
-     * probe: that probe answers "is ffmpeg's hwaccel path fast enough for the
-     * WHOLE file", a different question from "is it reliable for a 30-60s
-     * window" -- and a window this short stays well clear of the ~5-8 minute
-     * point where Transformer's video-only leg has been shown (this
-     * conversation's memory investigation, corroborated by androidx/media#758)
-     * to silently truncate. Safe Path is only a fallback for whatever
-     * hw_ffmpeg genuinely can't handle (e.g. an unsupported codec), and
-     * still gets the same duration check.
-     *
-     * Neither strategy produces this chunk's audio: each hands its
-     * video-only leg to [addAudioAndMux], which muxes it with this chunk's
-     * slice of [audioLeg] (null when the item has no audio). Because the
-     * audio is independent of how the video was made, a chunk that falls
-     * back from hw_ffmpeg to Safe Path reuses the same audio.
-     */
-    private suspend fun transcodeChunk(
-        item: MediaCollection.MediaNode.Item,
-        chunkStartMs: Long,
-        chunkDurationMs: Long,
-        targetVideoCodec: Constants.Transcoder.VideoCodec,
-        resolution: Constants.Transcoder.Resolution,
-        videoBitrateKbps: Int,
-        audioLeg: AudioLeg?,
-        outputFile: File,
-        timeoutMs: Long,
-        strategy: String,
-        fragmented: Boolean = false,
-        durationToleranceMs: Long = CHUNK_DURATION_TOLERANCE_MS,
-        sessionId: String,
-        // From computeChunkBoundaries: true only when chunkStartMs is a
-        // *confirmed* real source keyframe, not merely the nominal target
-        // that was asked for. Only the safe path uses this (see
-        // transcodeViaSafePath's setStartsAtKeyFrame) -- hw_ffmpeg instead
-        // verifies its own landing empirically after every seek,
-        // independent of whether the target happens to be a verified
-        // keyframe, so it needs no flag here.
-        startsAtVerifiedKeyframe: Boolean = false
-    ): ChunkOutcome {
-        outputFile.delete()
-        var outcome = if (strategy == "hw_ffmpeg") {
-            transcodeViaHardwareFfmpeg(item, targetVideoCodec, resolution, videoBitrateKbps, audioLeg, outputFile, chunkStartMs, chunkDurationMs, timeoutMs = timeoutMs, fragmented = fragmented, sessionId = sessionId)
-        } else {
-            ChunkOutcome.Failed
-        }
-        if (outcome != ChunkOutcome.Success) {
-            // The fallback shares this audio. If that is what failed, a second
-            // full video encode would only fail at the same mux.
-            if (audioUnavailable(audioLeg, chunkStartMs, chunkDurationMs)) {
-                Log.e(TAG, "transcodeChunk: $outcome for '${item.name}' [${chunkStartMs}ms +${chunkDurationMs}ms) and its audio can no longer be produced -- not falling back")
-                outputFile.delete()
-                return outcome
-            }
-            if (strategy == "hw_ffmpeg") Log.w(TAG, "transcodeChunk: hw_ffmpeg $outcome for '${item.name}' [${chunkStartMs}ms +${chunkDurationMs}ms), falling back to Safe Path")
-            outputFile.delete()
-            outcome = transcodeViaSafePath(
-                item, targetVideoCodec, resolution, audioLeg, outputFile, chunkDurationMs, chunkStartMs, timeoutMs = timeoutMs,
-                fragmented = fragmented, durationToleranceMs = durationToleranceMs, sessionId = sessionId, startsAtVerifiedKeyframe = startsAtVerifiedKeyframe
-            )
-        }
-        if (outcome != ChunkOutcome.Success) return outcome
-        return if (verifyChunkDuration(outputFile, chunkDurationMs, item.name, durationToleranceMs)) ChunkOutcome.Success else ChunkOutcome.Failed
-    }
-
-    /**
-     * Entry point for handling transcoded HTTP requests from HttpServer.
-     * Implements the scaffolding for serving transcoded streams on-the-fly.
-     *
-     * @param item The source media item to transcode.
-     * @param startByte The byte offset requested by the client (for Range headers).
-     * @param responder Callback to send status, headers and obtain an OutputStream.
-     */
-
-    /**
-     * Muxes this chunk's video leg with its audio into [outputFile], by
-     * stream copy -- nothing is encoded here.
-     *
-     * The audio is not encoded per chunk. It is read out of [audioLeg], the
-     * one encode of the whole range that [startAudioLeg] runs alongside the
-     * video chunks as a fragmented mp4, which can be read while it is still
-     * being written: [awaitAudioWindow] waits only until the part this
-     * chunk's window needs is complete (usually already the case -- audio
-     * encodes far faster than video does), and this pass then cuts that
-     * window out of it, on packet boundaries, while it muxes. So a chunk's
-     * audio costs no encode, no probe and no trim pass here, where it used to
-     * cost an encode, two probes and two trims.
-     *
-     * More to the point, the seams stop being the encoder's problem. An AAC
-     * encoder delays its output by a priming packet and ends on a padded
-     * one, so N independent per-chunk encodes carry N of each: every seam
-     * either 21ms off, or -- with the priming trimmed away -- decoded without
-     * the overlap partner it needs. One encode has one of each, and slices of
-     * it are one continuous stream cut into pieces. The one priming packet
-     * stays: the first chunk's slice opens with it, and the edit list the mux
-     * writes for it ([remuxVideoAndAudio]) tells a player to skip it, so
-     * nothing is shifted to hide it and the first real block decodes exactly
-     * as in the single encode ([AUDIO_KEEP_PRIMING]). Where each later slice
-     * belongs in the finished timeline is exact, and is the caller's to
-     * apply: see [audioFirstTickFor] and [patchFragmentTimestamps].
-     *
-     * The video decides the timeline, never the audio: chunks sit where
-     * their video keyframes are, each audio window is cut to its video
-     * chunk's boundaries, and the duration checks read the video track.
-     *
-     * [offsetMs]/[limitDurationMs] are this chunk's own window, the same one
-     * the video leg was given, so the two legs cannot disagree about what
-     * they cover. A null [audioLeg] means the item has no audio: this still
-     * runs, video only, because the cut below belongs to this pass.
-     *
-     * That cut: Media3 can let a clip run past its requested end, and an
-     * overrunning leg would overlap the next chunk's first frames at the
-     * seam. Rather than ask the export for extra and trim it back in a pass
-     * of its own (what SAFE_PATH_END_OVERSHOOT_MS and
-     * trimVideoLegToExactDuration used to do: 1.5s more encode per chunk,
-     * plus a packet probe and a copy of the whole leg), the video input is
-     * limited here to the window minus half a frame. A frame survives only
-     * if it starts before that point, so a frame belonging to the next chunk
-     * is dropped, the last real frame (a whole frame short of the boundary)
-     * never is, and a leg that did not overrun passes through untouched. It
-     * can only remove what is there: a leg that came up short is not made
-     * whole by it, and the seam shows that as a held frame (see
-     * [scanAssembledSeams]) -- the price of not encoding extra to be sure.
-     *
-     * [frameRate] only sizes that half frame; null falls back to
-     * [ASSUMED_FRAME_RATE_FPS], and the result is bounded either way.
-     */
-    private suspend fun addAudioAndMux(
-        item: MediaCollection.MediaNode.Item,
-        videoOnlyFile: File,
-        outputFile: File,
-        audioLeg: AudioLeg?,
-        offsetMs: Long,
-        limitDurationMs: Long?,
-        frameRate: Double?,
-        fragmented: Boolean
-    ): ChunkOutcome {
-        var window: AudioWindow? = null
-        try {
-            if (audioLeg != null) {
-                window = awaitAudioWindow(audioLeg, (offsetMs - audioLeg.rangeStartMs).coerceAtLeast(0L), limitDurationMs, item.name)
-                if (window == null) {
-                    Log.e(TAG, "addAudioAndMux: '${item.name}' -- the audio for [${offsetMs}ms +${limitDurationMs}ms) never became available, failing the chunk")
-                    return ChunkOutcome.Failed
-                }
-            }
-            val videoLimitSeconds = limitDurationMs?.let { (it - halfFrameMs(frameRate)) / 1000.0 }
-            val muxOk = remuxVideoAndAudio(videoOnlyFile, window, outputFile, fragmented = fragmented, videoLimitSeconds = videoLimitSeconds)
-            if (!muxOk || !outputFile.exists() || outputFile.length() == 0L) return ChunkOutcome.Failed
-            if (window?.keepsPriming == true) {
-                // The edit list is what turns "the packet is in the file" into "a
-                // player skips it". Read it back rather than trust the muxer to
-                // have written it: without it the audio plays one packet late.
-                val declared = readAudioEditListStartTicks(outputFile)
-                if (declared == null || declared <= 0L) {
-                    Log.w(TAG, "addAudioAndMux: '${item.name}' -- the first chunk carries the audio's priming packet but its edit list does not declare it (media_time=$declared); a player will play that packet and the audio will run about one packet late")
-                } else {
-                    Log.d(TAG, "addAudioAndMux: '${item.name}' -- priming declared in the first chunk's edit list (media_time=$declared ticks)")
-                }
-            }
-            return if (window == null || verifyMuxedAvSync(outputFile, item.name)) ChunkOutcome.Success else ChunkOutcome.Failed
-        } finally {
-            videoOnlyFile.delete()
-            window?.let { if (it.temporary) it.file.delete() }
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // The audio leg: one encode for the whole range, readable while it runs.
-    // ---------------------------------------------------------------------
-
-    /**
-     * What a reader needs to know about the audio encode's packet grid, all
-     * of it read from the file itself rather than assumed per codec.
-     *
-     * [primingTicks] is the encoder delay the file *declares* in its edit
-     * list (0 when it declares none). Slicing is done in presentation time,
-     * the way a player sees the file: raw packet j is presented at
-     * `j * packetTicks - primingTicks`, so with a declared priming of one
-     * packet the priming packet sits at -1 packet and the first real one at
-     * 0, and a 1024-sample AAC frame, a 1536-sample AC-3 frame and an
-     * encoder whose delay is not a whole packet are all the same arithmetic.
-     */
-    private data class AudioLayout(val timescale: Int, val packetTicks: Long, val primingTicks: Long) {
-        /** True when the output keeps the priming packet ([AUDIO_KEEP_PRIMING]) and so has to declare it. */
-        val keepsPriming: Boolean get() = AUDIO_KEEP_PRIMING && primingTicks > 0L
-        /** How far in front of presentation time zero the output's audio track
-         *  runs: all of the priming, or none of it. It is the difference between
-         *  a packet's presentation time and its place on the track's own
-         *  timeline, which is where fragments are positioned. Only the audio
-         *  track has it -- the video is never offset. */
-        val keptPrimingTicks: Long get() = if (keepsPriming) primingTicks else 0L
-    }
-
-    /** How much of the audio encode a reader may use, republished through
-     *  [AudioLeg.progress] each time it grows. */
-    private data class AudioProgress(
-        /** Null until the first fragment is complete -- until then there is
-         *  no moov to read it from. */
-        val layout: AudioLayout? = null,
-        /** Complete packets in the readable prefix, the priming packet
-         *  included (so raw packet j needs `packets > j`). */
-        val packets: Long = 0L,
-        /** The encode ended cleanly: the file is complete and no longer changes. */
-        val finished: Boolean = false,
-        /** The encode failed, timed out or was cancelled; what was readable
-         *  stays readable, but nothing more is coming. */
-        val failed: Boolean = false
-    )
-
-    /** One complete fragment of the audio file: its end offset, and the
-     *  running packet count through it. [AudioLeg.fragmentEnds] holds them
-     *  in order, which is how a reader finds the byte offset to cut a
-     *  snapshot at. */
-    private class AudioFragmentEnd(val packetsAfter: Long, val byteEnd: Long)
-
-    /**
-     * Handle on the one audio encode of a transcode: its output file, how
-     * far that has got, and the coroutine producing it.
-     *
-     * [rawFile] is what ffmpeg writes, so while the encode runs it can end
-     * anywhere -- including in the middle of a fragment's header, which
-     * ffmpeg's mp4 demuxer refuses to open at all -- and it is never handed
-     * to a reader in that state. Readers get either [rawFile] once the
-     * encode has [AudioProgress.finished], or an immutable snapshot of its
-     * complete-fragment prefix (see [awaitAudioWindow]).
-     */
-    private class AudioLeg(val rawFile: File, val rangeStartMs: Long) {
-        val progress = MutableStateFlow(AudioProgress())
-        val fragmentEnds = ArrayList<AudioFragmentEnd>()
-        @Volatile var job: Job? = null
-        fun cancel() { job?.cancel() }
-        /** End offset of the first complete fragment that brings the packet
-         *  count to at least [packets], or null if none has yet. */
-        fun endOfFragmentCovering(packets: Long): Long? =
-            synchronized(fragmentEnds) { fragmentEnds.firstOrNull { it.packetsAfter >= packets }?.byteEnd }
-    }
-
-    /** Where the tailer has got to in the raw file. Touched by one coroutine only. */
-    private class AudioTailState {
-        var scannedBytes = 0L
-        var packets = 0L
-        var layout: AudioLayout? = null
-    }
-
-    /** One chunk's slice of the audio leg, as the mux wants it. */
-    private class AudioWindow(
-        /** The file to read: the finished raw file, or a snapshot. */
-        val file: File,
-        /** Input `-ss`, null when the window starts at the very beginning. */
-        val seekSeconds: Double?,
-        /** Input `-t`, null for a window that runs to the end of the audio. */
-        val durationSeconds: Double?,
-        /** Where the slice's first packet belongs on the finished audio
-         *  track's own timeline, in its ticks: its presentation time plus
-         *  whatever priming the track carries ahead of time zero. */
-        val firstTick: Long,
-        /** True when the slice deliberately begins with the encoder's priming
-         *  packet (the window that opens the range, when the priming is kept):
-         *  the mux must then neither cut strictly at the start nor shift to
-         *  make that packet's negative time zero -- see [remuxVideoAndAudio]. */
-        val keepsPriming: Boolean,
-        /** True for a snapshot: the user of the window deletes it. */
-        val temporary: Boolean
-    )
-
-    /** Which packets a chunk's window takes, and what to wait for. */
-    private class AudioWindowPlan(
-        val firstTick: Long,
-        val seekSeconds: Double?,
-        val durationSeconds: Double?,
-        val neededPackets: Long,
-        val keepsPriming: Boolean
-    )
-
-    private fun audioLegRawFile(item: MediaCollection.MediaNode.Item, sessionId: String): File =
-        File(durableWorkDir, "audio_raw_${item.id}_$sessionId.m4a")
-
-    private fun ceilDiv(a: Long, b: Long): Long = (a + b - 1) / b
-
-    private fun formatSeconds(seconds: Double): String = String.format(Locale.US, "%.6f", seconds)
-
-    /**
-     * Half of one frame, in ms: the margin the video clamp in
-     * [addAudioAndMux] keeps from the chunk boundary. Bounded so that an
-     * implausible frame rate (a 1fps slideshow, a mis-probed 240) can neither
-     * turn the clamp into a no-op nor eat into real frames.
-     */
-    private fun halfFrameMs(frameRate: Double?): Double =
-        (500.0 / (frameRate ?: ASSUMED_FRAME_RATE_FPS)).coerceIn(4.0, 40.0)
-
-    /**
-     * Starts the one audio encode for a transcode, as a child of [parent],
-     * and returns immediately. Null when the item has no audio on
-     * [audioTrackIndex] -- the chunks are then video-only.
-     *
-     * [rangeStartMs]/[rangeDurationMs] are the whole range every chunk will
-     * cover, so chunk windows are offsets into this one encode. It is written
-     * as a fragmented mp4 (see [transcodeAudioTrack]) and [produceAudioLeg]
-     * publishes how much of it is complete, which is what lets the first
-     * chunk be muxed long before the last of the audio has been encoded.
-     *
-     * Being a child of [parent] is what stops it: cancel the scope and the
-     * encode's ffmpeg process is killed ([runProcessCapture]), and callers
-     * additionally [AudioLeg.cancel] it on their way out so a failed
-     * transcode doesn't sit waiting for audio nobody needs.
-     */
-    private suspend fun startAudioLeg(
-        parent: CoroutineScope,
-        item: MediaCollection.MediaNode.Item,
-        rangeStartMs: Long,
-        rangeDurationMs: Long,
-        targetAudioCodec: Constants.Transcoder.AudioCodec,
-        audioBitrateBps: Int,
-        audioTrackIndex: Int,
-        sessionId: String
-    ): AudioLeg? {
-        if (!itemHasAudio(item, audioTrackIndex)) {
-            Log.d(TAG, "startAudioLeg: '${item.name}' has no audio on track $audioTrackIndex -- its chunks will be video-only")
-            return null
-        }
-        val leg = AudioLeg(audioLegRawFile(item, sessionId), rangeStartMs)
-        leg.rawFile.delete()
-        leg.job = parent.launch(Dispatchers.IO) {
-            produceAudioLeg(leg, item, rangeDurationMs, targetAudioCodec, audioBitrateBps, audioTrackIndex)
-        }
-        return leg
-    }
-
-    /**
-     * Body of the audio leg's coroutine: runs the encode and, while it runs,
-     * keeps [AudioLeg.progress] and [AudioLeg.fragmentEnds] current by
-     * indexing the fragments ffmpeg has finished writing.
-     *
-     * Never throws except to propagate cancellation: this is a child of the
-     * transcode's scope, and a child that throws cancels its siblings -- the
-     * video chunks included -- which is a decision for the transcode to
-     * make from the `failed` flag, not for this coroutine to make by
-     * crashing.
-     */
-    private suspend fun produceAudioLeg(
-        leg: AudioLeg,
-        item: MediaCollection.MediaNode.Item,
-        rangeDurationMs: Long,
-        targetAudioCodec: Constants.Transcoder.AudioCodec,
-        audioBitrateBps: Int,
-        audioTrackIndex: Int
-    ) {
-        val startedAt = System.currentTimeMillis()
-        val state = AudioTailState()
-        var settled = false
-        try {
-            coroutineScope {
-                Log.d(TAG, "Audio leg: '${item.name}' -- encoding [${leg.rangeStartMs}ms +${rangeDurationMs}ms) once, fragmented, to ${leg.rawFile.name}; chunks mux from it while it is still being written")
-                val encode = async {
-                    try {
-                        transcodeAudioTrack(
-                            item, leg.rawFile, durationS = rangeDurationMs / 1000.0, startTimeMs = leg.rangeStartMs,
-                            encoder = targetAudioCodec.encoderId, audioBitrateBps = audioBitrateBps, audioTrackIndex = audioTrackIndex,
-                            timeoutMs = Budget.forAudio(rangeDurationMs)
-                        )
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Audio leg: '${item.name}' encode threw: ${e.message}", e)
-                        false
-                    }
-                }
-                while (true) {
-                    // Sampled BEFORE the pass, so a pass that sees the encode
-                    // already over is guaranteed to see its file complete.
-                    val encodeEnded = encode.isCompleted
-                    indexAudioFragments(leg, state)
-                    val progress = AudioProgress(state.layout, state.packets)
-                    if (progress != leg.progress.value) leg.progress.value = progress
-                    if (encodeEnded) break
-                    delay(AUDIO_TAIL_POLL_MS)
-                }
-                val ok = encode.await()
-                leg.progress.value = AudioProgress(state.layout, state.packets, finished = ok, failed = !ok)
-                settled = true
-                val layout = state.layout
-                Log.d(TAG, "Audio leg: '${item.name}' ${if (ok) "finished" else "FAILED"} after ${System.currentTimeMillis() - startedAt}ms -- ${state.packets} packet(s) in ${leg.fragmentEnds.size} fragment(s), ${leg.rawFile.length()} bytes, layout=$layout")
-                // AAC encoders delay their output and (with delay_moov) declare it; a
-                // codec with no delay, AC-3 say, legitimately declares nothing.
-                if (ok && layout != null && layout.primingTicks == 0L && targetAudioCodec == Constants.Transcoder.AudioCodec.AAC) {
-                    Log.w(TAG, "Audio leg: '${item.name}' -- the AAC encode declared no priming (no edit list), so its first packet is being treated as real audio; if the encoder does delay its output, audio will trail the video by that much")
-                }
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Log.e(TAG, "Audio leg: '${item.name}' -- producer threw: ${e.message}", e)
-        } finally {
-            // Whatever ended this -- failure, an exception, cancellation --
-            // anyone still waiting on the audio is released rather than left
-            // waiting for a coroutine that is gone.
-            if (!settled) leg.progress.value = leg.progress.value.copy(failed = true)
-        }
-    }
-
-    /**
-     * One pass of the tailer: extends [state] over every *complete*
-     * `moof`+`mdat` pair ffmpeg has written to [AudioLeg.rawFile] since the
-     * last pass, recording each fragment's end and the packets through it.
-     *
-     * Complete is the point. The file is being appended to by another
-     * process, so at any instant it may end partway through a box, and a
-     * fragment is only counted once both its `moof` and its whole `mdat`
-     * are on disk. A pass only ever reads box headers (and one `moof` per
-     * fragment), starting where the last one stopped, so its cost does not
-     * grow with the file.
-     */
-    private fun indexAudioFragments(leg: AudioLeg, state: AudioTailState) {
-        if (!leg.rawFile.exists()) return // ffmpeg hasn't created it yet
-        try {
-            RandomAccessFile(leg.rawFile, "r").use { raw ->
-                val len = raw.length()
-                var pos = state.scannedBytes
-                var packets = state.packets
-                var layout = state.layout
-                while (true) {
-                    val (type, size) = readBoxHeader(raw, pos) ?: break
-                    // 0 means "to the end of the file", which nothing this muxer
-                    // writes mid-file does; below 8 is not a box. Stop, don't guess.
-                    if (size < 8L) break
-                    if (type == "moof") {
-                        val (nextType, nextSize) = readBoxHeader(raw, pos + size) ?: break
-                        if (nextType != "mdat" || nextSize < 8L || pos + size + nextSize > len) break
-                        if (layout == null) layout = readAudioLayout(raw, pos, size) ?: break
-                        packets += readFragmentSamples(raw, pos, size).first
-                        pos += size + nextSize
-                        synchronized(leg.fragmentEnds) { leg.fragmentEnds.add(AudioFragmentEnd(packets, pos)) }
-                    } else {
-                        if (pos + size > len) break
-                        pos += size
-                    }
-                }
-                state.scannedBytes = pos
-                state.packets = packets
-                state.layout = layout
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "indexAudioFragments: ${leg.rawFile.name} -- ${e.message}; will retry on the next pass")
-        }
-    }
-
-    /**
-     * Reads the audio track's [AudioLayout] from the start of the audio
-     * file: timescale from the moov's mdhd, declared priming from the first
-     * entry of its edit list, packet duration from the first fragment.
-     * [firstMoofPos]/[firstMoofSize] locate that fragment, which is complete
-     * by the time this runs; the moov before it is too, since the muxer
-     * writes it ahead of the first fragment. Null if any of it can't be read.
-     */
-    private fun readAudioLayout(raf: RandomAccessFile, firstMoofPos: Long, firstMoofSize: Long): AudioLayout? {
-        val moov = findTopLevelBox(raf, 0L, firstMoofPos, "moov") ?: return null
-        val trak = findTopLevelBox(raf, moov.first + 8, moov.second, "trak") ?: return null
-        val mdia = findTopLevelBox(raf, trak.first + 8, trak.second, "mdia") ?: return null
-        val mdhd = findTopLevelBox(raf, mdia.first + 8, mdia.second, "mdhd") ?: return null
-        raf.seek(mdhd.first + 8)
-        val mdhdVersion = raf.readByte().toInt()
-        raf.seek(mdhd.first + 8 + (if (mdhdVersion == 1) 20 else 12))
-        val timescale = raf.readIntBE()
-        if (timescale <= 0) return null
-
-        var primingTicks = 0L
-        val edts = findTopLevelBox(raf, trak.first + 8, trak.second, "edts")
-        val elst = edts?.let { findTopLevelBox(raf, it.first + 8, it.second, "elst") }
-        if (elst != null) {
-            val mediaTime = readFirstEditMediaTime(raf, elst.first)
-            if (mediaTime != null && mediaTime > 0L) primingTicks = mediaTime
-        }
-
-        var packetTicks = readFragmentSamples(raf, firstMoofPos, firstMoofSize).second
-        if (packetTicks == null || packetTicks <= 0L) {
-            Log.w(TAG, "readAudioLayout: no packet duration in the first fragment -- assuming 1024 ticks (AAC-LC)")
-            packetTicks = 1024L
-        }
-        return AudioLayout(timescale, packetTicks, primingTicks)
-    }
-
-    /**
-     * Sample count of one fragment, and the duration of its first sample in
-     * ticks (from the trun's own per-sample table if it has one, else the
-     * tfhd default). A `moof` from this muxer carries one `traf` for the one
-     * audio track; counts are summed across any anyway.
-     */
-    private fun readFragmentSamples(raf: RandomAccessFile, moofPos: Long, moofSize: Long): Pair<Long, Long?> {
-        val moofEnd = moofPos + moofSize
-        var count = 0L
-        var firstDuration: Long? = null
-        var trafPos = moofPos + 8
-        while (trafPos + 8 <= moofEnd) {
-            val (trafType, trafSize) = readBoxHeader(raf, trafPos) ?: break
-            if (trafType == "traf") {
-                val trafEnd = trafPos + trafSize
-                var defaultDuration: Long? = null
-                var boxPos = trafPos + 8
-                while (boxPos + 8 <= trafEnd) {
-                    val (boxType, boxSize) = readBoxHeader(raf, boxPos) ?: break
-                    if (boxType == "tfhd") {
-                        raf.seek(boxPos + 8)
-                        val flags = raf.readIntBE() and 0xFFFFFF
-                        var p = boxPos + 16 // header(8) + version/flags(4) + track_ID(4)
-                        if ((flags and 0x1) != 0) p += 8   // base_data_offset
-                        if ((flags and 0x2) != 0) p += 4   // sample_description_index
-                        if ((flags and 0x8) != 0) {        // default_sample_duration
-                            raf.seek(p)
-                            defaultDuration = raf.readIntBE().toLong() and 0xFFFFFFFFL
-                        }
-                    } else if (boxType == "trun") {
-                        raf.seek(boxPos + 8)
-                        val flags = raf.readIntBE() and 0xFFFFFF
-                        val sampleCount = raf.readIntBE().toLong() and 0xFFFFFFFFL
-                        count += sampleCount
-                        if (firstDuration == null && (flags and 0x100) != 0 && sampleCount > 0L) {
-                            var p = boxPos + 16 // header(8) + version/flags(4) + sample_count(4)
-                            if ((flags and 0x1) != 0) p += 4 // data_offset
-                            if ((flags and 0x4) != 0) p += 4 // first_sample_flags
-                            raf.seek(p)
-                            firstDuration = raf.readIntBE().toLong() and 0xFFFFFFFFL
-                        }
-                    }
-                    if (boxSize <= 0L) break
-                    boxPos += boxSize
-                }
-                if (firstDuration == null) firstDuration = defaultDuration
-            }
-            if (trafSize <= 0L) break
-            trafPos += trafSize
-        }
-        return count to firstDuration
-    }
-
-    /**
-     * Which packets of the audio leg belong to the chunk window
-     * [startOffsetMs, startOffsetMs + durationMs), and what the mux needs to
-     * cut them out. Pure arithmetic, in integers: the same inputs always
-     * give the same answer, which is what lets a caller recompute
-     * [AudioWindowPlan.firstTick] after the fact ([audioFirstTickFor])
-     * instead of having it threaded back through the chunk pipeline.
-     *
-     * The window is the video chunk's own: the audio is cut to the video's
-     * boundaries, not the other way round. A packet belongs to the window if
-     * it *starts* inside it. Raw packet j starts at
-     * `j * packetTicks - primingTicks` (presentation time), so the first one
-     * is the smallest j with that >= the window's start, and the window ends
-     * before the first j that reaches its end. Consecutive windows therefore
-     * partition the packets exactly: each packet is in one chunk, none
-     * twice, none dropped -- whatever the chunk boundaries, which fall
-     * wherever the video keyframes do and are not multiples of a packet. The
-     * slice starts up to one packet *after* its chunk's start; that is not a
-     * gap, because [AudioWindowPlan.firstTick] puts it where it really is.
-     *
-     * The one exception is the window that opens the range when the priming
-     * is kept ([AudioLayout.keepsPriming]): it also takes the packet(s)
-     * before presentation time zero, i.e. the priming itself, which is what
-     * makes the audio's first real block reconstructable. That slice then
-     * has no seek -- it starts at the start of the file -- and its `-t` is
-     * counted from presentation zero.
-     *
-     * Otherwise the seek lands [AUDIO_SLICE_SEEK_EPSILON_S] before the first
-     * packet (see the constant for why), and the duration is cut half a
-     * packet short of the end, midway between two packet starts, where
-     * rounding can't matter. [AudioWindowPlan.neededPackets] is one more than
-     * the last packet the window takes: ffmpeg decides a window is over by
-     * seeing the first packet past it, so that one must exist and be
-     * complete too.
-     */
-    private fun planAudioWindow(layout: AudioLayout, startOffsetMs: Long, durationMs: Long?): AudioWindowPlan {
-        val ts = layout.timescale.toLong()
-        val pk = layout.packetTicks
-        val priming = layout.primingTicks
-        fun firstPacketAtOrAfter(ms: Long): Long = ceilDiv(ms * ts + priming * 1000L, pk * 1000L)
-        val keepsPriming = layout.keepsPriming && startOffsetMs <= 0L
-        val first = if (keepsPriming) 0L else firstPacketAtOrAfter(startOffsetMs)
-        val presentationTick = first * pk - priming // negative for the priming packet
-        val firstTick = presentationTick + layout.keptPrimingTicks
-        val seek = (presentationTick.toDouble() / ts - AUDIO_SLICE_SEEK_EPSILON_S).takeIf { it > 0.0 }
-        // Open-ended: no `-t`, and no packet count to wait for -- only the end of the encode.
-        if (durationMs == null) return AudioWindowPlan(firstTick, seek, null, Long.MAX_VALUE, keepsPriming)
-        val end = firstPacketAtOrAfter(startOffsetMs + durationMs)
-        // `-t` is counted from the seek point, or from presentation zero when there is none.
-        val duration = (((end - 0.5) * pk - priming) / ts - (seek ?: 0.0)).coerceAtLeast(0.5 * pk / ts)
-        return AudioWindowPlan(firstTick, seek, duration, end + 1, keepsPriming)
-    }
-
-    /**
-     * Waits until the part of [leg] that [startOffsetMs]/[durationMs] needs
-     * is complete, and returns the slice to mux. Null if the audio can't
-     * supply it: the encode failed before getting there, or produced
-     * nothing readable.
-     *
-     * Two ways to read the audio, chosen by whether the encode is over. Once
-     * it is, the raw file is complete and unchanging and is read directly.
-     * Until then it is still being appended to and can end mid-box, which
-     * ffmpeg's mp4 demuxer rejects outright at open -- so what's handed out
-     * is a snapshot: a copy of the file up to the end of the first complete
-     * fragment that covers the window. That copy is as large as the audio
-     * *so far*, but it is only made while the encode is still running, which
-     * at the speed audio encodes is the first handful of chunks, and it is
-     * a few hundred KB each at that point.
-     */
-    private suspend fun awaitAudioWindow(leg: AudioLeg, startOffsetMs: Long, durationMs: Long?, itemName: String): AudioWindow? {
-        val waitStartedAt = System.currentTimeMillis()
-        val layoutState = leg.progress.first { it.layout != null || it.finished || it.failed }
-        val layout = layoutState.layout
-        if (layout == null) {
-            Log.e(TAG, "awaitAudioWindow: '$itemName' -- the audio encode ended without producing a readable fragment")
-            return null
-        }
-        val plan = planAudioWindow(layout, startOffsetMs, durationMs)
-        val state = leg.progress.first { it.packets >= plan.neededPackets || it.finished || it.failed }
-        val waitedMs = System.currentTimeMillis() - waitStartedAt
-        if (state.packets < plan.neededPackets && !state.finished) {
-            Log.e(TAG, "awaitAudioWindow: '$itemName' -- the audio encode failed with ${state.packets} packet(s) written, short of the ${plan.neededPackets} that [${startOffsetMs}ms +${durationMs}ms) needs")
-            return null
-        }
-        val readFile: File
-        val temporary: Boolean
-        if (state.finished) {
-            readFile = leg.rawFile
-            temporary = false
-        } else {
-            val end = leg.endOfFragmentCovering(plan.neededPackets)
-            if (end == null) {
-                Log.e(TAG, "awaitAudioWindow: '$itemName' -- no complete fragment covers packet ${plan.neededPackets} despite the count saying so")
-                return null
-            }
-            readFile = File(durableWorkDir, "${leg.rawFile.nameWithoutExtension}_snap_${System.nanoTime()}.m4a")
             try {
-                copyPrefix(leg.rawFile, readFile, end)
-            } catch (e: Exception) {
-                Log.e(TAG, "awaitAudioWindow: '$itemName' -- couldn't snapshot the first $end byte(s) of ${leg.rawFile.name}: ${e.message}")
-                readFile.delete()
-                return null
-            }
-            temporary = true
-        }
-        Log.d(TAG, "awaitAudioWindow: '$itemName' [${startOffsetMs}ms +${durationMs}ms) -- waited ${waitedMs}ms, ${if (temporary) "snapshot of the first ${readFile.length()} bytes" else "finished file"}, first packet at tick ${plan.firstTick}/${layout.timescale}")
-        return AudioWindow(readFile, plan.seekSeconds, plan.durationSeconds, plan.firstTick, plan.keepsPriming, temporary)
-    }
-
-    /** Copies the first [length] bytes of [source] to [target]. */
-    private fun copyPrefix(source: File, target: File, length: Long) {
-        FileInputStream(source).use { input ->
-            FileOutputStream(target).use { output ->
-                val buffer = ByteArray(64 * 1024)
-                var remaining = length
-                while (remaining > 0L) {
-                    val n = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
-                    if (n < 0) break
-                    output.write(buffer, 0, n)
-                    remaining -= n
-                }
-            }
-        }
-    }
-
-    /**
-     * Where the audio of the chunk window [chunkStartMs, +[chunkDurationMs])
-     * must be placed in the finished timeline: the presentation time of its
-     * slice's first packet, in the audio track's own ticks. Null when there
-     * is no audio, or its layout isn't known yet (it always is once a chunk
-     * has been muxed from it).
-     */
-    private fun audioFirstTickFor(leg: AudioLeg?, chunkStartMs: Long, chunkDurationMs: Long): Long? {
-        if (leg == null) return null
-        val layout = leg.progress.value.layout ?: return null
-        return planAudioWindow(layout, (chunkStartMs - leg.rangeStartMs).coerceAtLeast(0L), chunkDurationMs).firstTick
-    }
-
-    /**
-     * True when the audio encode has failed *and* did not get as far as the
-     * chunk window [chunkStartMs, +[chunkDurationMs]) needs -- i.e. when this
-     * chunk's audio can now never exist. A failed encode whose readable
-     * prefix already covers the window is not "unavailable": that chunk can
-     * still be muxed. Used to stop spending video-encode time (and retries) on
-     * a chunk that is certain to fail at the mux.
-     */
-    private fun audioUnavailable(leg: AudioLeg?, chunkStartMs: Long, chunkDurationMs: Long): Boolean {
-        if (leg == null) return false
-        val state = leg.progress.value
-        if (!state.failed) return false
-        val layout = state.layout ?: return true
-        val plan = planAudioWindow(layout, (chunkStartMs - leg.rangeStartMs).coerceAtLeast(0L), chunkDurationMs)
-        return state.packets < plan.neededPackets
-    }
-
-    /**
-     * Per-track tick offsets that put a chunk's fragments where they belong,
-     * for [patchFragmentTimestamps]. Video goes where its keyframe is in
-     * the source ([videoOffsetMs], exact: chunk starts are the nominal
-     * boundaries). Audio goes where its slice's first packet is
-     * ([audioFirstTick], exact on the packet grid), which is up to a packet
-     * after the video: placing both by the same millisecond figure instead
-     * would nudge every audio seam off the grid by up to 21ms, each time a
-     * different amount. [audioFirstTick] is on the audio track's own
-     * timeline -- including the priming it carries ahead of time zero when
-     * that is kept ([AudioLayout.keptPrimingTicks]), which chunk 0's edit
-     * list accounts for. The video is never offset.
-     *
-     * Both assume the chunk's own fragments start at tfdt 0 -- true of the
-     * muxed chunks this file produces, and logged per chunk
-     * ([concatChunksFragmented]) so a chunk that doesn't is visible.
-     */
-    private fun chunkPlacementTicks(
-        trackTimescales: Map<Int, Int>,
-        audioTrackId: Int?,
-        audioTimescale: Int?,
-        videoOffsetMs: Long,
-        audioFirstTick: Long?
-    ): Map<Int, Long> = trackTimescales.mapValues { (trackId, timescale) ->
-        if (trackId == audioTrackId && audioFirstTick != null && audioTimescale != null && audioTimescale > 0) {
-            Math.round(audioFirstTick.toDouble() * timescale / audioTimescale)
-        } else {
-            Math.round(videoOffsetMs / 1000.0 * timescale)
-        }
-    }
-
-    /**
-     * Full-file chunked mode: transcodes [rangeStartMs, rangeStartMs +
-     * rangeDurationMs) in keyframe-aligned windows of about
-     * [chunkDurationMs] and stitches the verified chunk outputs into one
-     * valid MP4 ([concatChunksFragmented]), stream copy throughout. Each
-     * chunk is retried up to [maxRetriesPerChunk] times before the whole
-     * transcode is given up on -- a stalled/truncated chunk costs a retry
-     * of ~30-60s of work, not the whole file.
-     *
-     * Audio is encoded once, for the whole range, on a coroutine of its own
-     * ([startAudioLeg]) that runs alongside the video chunks instead of
-     * after each of them. Each chunk's mux then takes its slice of that
-     * encode ([addAudioAndMux]) the moment the part it needs has been
-     * written -- which, audio being far cheaper to encode than video, is
-     * almost always before the chunk's own video is even done. So a chunk's
-     * remux never waits on audio, and the video loop never waits on an
-     * audio encode of its own the way it used to, once per chunk.
-     *
-     * Chunks are placed in the finished file by where they belong in the
-     * *source*, not by adding up how long each came out: video at its
-     * chunk's nominal start, audio on its own packet grid
-     * ([chunkPlacementTicks]). Summing measured durations lets every
-     * chunk's rounding error compound into drift against an audio track
-     * that no longer has any chunk-sized pieces to drift with.
-     */
-    private suspend fun transcodeInChunks(
-        item: MediaCollection.MediaNode.Item,
-        targetVideoCodec: Constants.Transcoder.VideoCodec,
-        resolution: Constants.Transcoder.Resolution,
-        videoBitrateKbps: Int,
-        targetAudioCodec: Constants.Transcoder.AudioCodec,
-        audioBitrateBps: Int,
-        audioTrackIndex: Int,
-        finalOutputFile: File,
-        rangeStartMs: Long,
-        rangeDurationMs: Long?,
-        chunkDurationMs: Long,
-        strategy: String,
-        maxRetriesPerChunk: Int = 1
-    ): Boolean {
-        // Every temp file this call creates carries this id. Without it, two
-        // concurrent file-mode requests for the same item -- or a file-mode
-        // request overlapping a streaming one -- wrote the identical
-        // chunk_<id>_NNNN.mp4 / audio paths, and one request's ffmpeg process
-        // clobbered the other's input mid-read.
-        val sessionId = UUID.randomUUID().toString().take(8)
-        val totalDurationMs = rangeDurationMs ?: (resolveSourceDurationMs(item) - rangeStartMs)
-        if (totalDurationMs <= 0) {
-            Log.e(TAG, "Chunked transcode: nothing to do for '${item.name}' (rangeStartMs=$rangeStartMs, item.durationMs=${item.durationMs})")
-            return false
-        }
-        Log.w(TAG, "0")
-        val chunkBoundaries = computeChunkBoundaries(item, chunkDurationMs, rangeStartMs, rangeDurationMs)
-        Log.w(TAG, "2")
-        val numChunks = chunkBoundaries.size
-        if (numChunks == 0) {
-            Log.e(TAG, "Chunked transcode: no chunk boundaries computed for '${item.name}' -- nothing to transcode")
-            return false
-        }
-        Log.d(TAG, "Chunked transcode: '${item.name}' -- $numChunks keyframe-aligned chunk(s) over ${totalDurationMs}ms total (session=$sessionId)")
-
-        // Detect and abort, rather than silently starting a job that cannot
-        // finish in any reasonable time. Every ffmpeg invocation over a pipe
-        // re-reads the source from byte 0 -- the pipe is forward-only, so `-ss`
-        // on a late chunk decodes and discards everything before its own start
-        // offset -- which makes the cost quadratic in chunk count. Resolving the
-        // input here rather than inside the first chunk also means the mirror,
-        // if one is affordable, is paid for once up front instead of racing the
-        // chunk loop.
-        //
-        // The honest fix for the underlying problem is more free space, so the
-        // message says so. It has nowhere better to go than the log today: this
-        // controller's repo surface is the seek bar and nothing else.
-        val resolvedInput = resolveFfmpegInputPath(item)
-        if (resolvedInput.isPiped && numChunks > PIPE_MAX_CHUNKS_BEFORE_ABORT) {
-            Log.e(TAG, "Chunked transcode: refusing '${item.name}' -- not enough free space to transcode this file. Its source could not be mirrored locally (needs its own size plus ${MIN_FREE_SPACE_AFTER_MIRROR_MB}MB free in ${workDir.absolutePath}, ${diagnosticSnapshot()}), so all $numChunks chunk(s) would stream it from the start over pipe:0 -- roughly $numChunks full reads of the source. Free up space and retry.")
-            releaseSourceMirror(item)
-            return false
-        }
-
-        val firstStartMs = chunkBoundaries.first().startMs
-        val lastBoundary = chunkBoundaries.last()
-        val audioRangeMs = lastBoundary.startMs + lastBoundary.durationMs - firstStartMs
-
-        val chunkFiles = mutableListOf<File>()
-        // One entry per chunkFiles entry:
-        //  - chunkNominalDurationsMs: chunkDurMs from computeChunkBoundaries --
-        //    pure arithmetic, computed before any encoding happened.
-        //  - chunkVideoDurationsMs: the muxed chunk's own video-track duration
-        //    as measured. It places nothing -- chunks go where the source puts
-        //    them -- and exists to be compared with the nominal figure, per
-        //    chunk here and per seam in concatChunksFragmented: the difference
-        //    is exactly how long a seam holds a frame (video came up short) or
-        //    would have overlapped (video ran long, before the cut in
-        //    addAudioAndMux).
-        //  - chunkAudioFirstTicks: where each chunk's audio slice belongs on
-        //    the audio packet grid, in audio ticks; null with no audio.
-        val chunkNominalDurationsMs = mutableListOf<Long>()
-        val chunkVideoDurationsMs = mutableListOf<Long>()
-        val chunkAudioFirstTicks = mutableListOf<Long?>()
-        try {
-            return coroutineScope<Boolean> {
-                val audioLeg = startAudioLeg(
-                    this, item, rangeStartMs = firstStartMs, rangeDurationMs = audioRangeMs,
-                    targetAudioCodec = targetAudioCodec, audioBitrateBps = audioBitrateBps,
-                    audioTrackIndex = audioTrackIndex, sessionId = sessionId
-                )
-                try {
-                    for (i in chunkBoundaries.indices) {
-                        val (chunkStartMs, chunkDurMs, startsAtVerifiedKeyframe) = chunkBoundaries[i]
-                        val chunkFile = File(durableWorkDir, "chunk_${item.id}_${sessionId}_${i.toString().padStart(4, '0')}.mp4")
-                        // The last chunk's requested end comes from a duration that may be
-                        // a little long; coming up short there is expected, not a
-                        // truncation. Everything before it stays strict.
-                        val toleranceMs = if (i == chunkBoundaries.lastIndex) FINAL_CHUNK_TOLERANCE_MS else CHUNK_DURATION_TOLERANCE_MS
-
-                        // Encoding video for a chunk whose audio can never arrive
-                        // is minutes of work with a certain failure at the end.
-                        if (audioUnavailable(audioLeg, chunkStartMs, chunkDurMs)) {
-                            Log.e(TAG, "Chunked transcode: aborting '${item.name}' before chunk $i/$numChunks -- the audio encode has failed and did not get as far as this chunk's window")
-                            return@coroutineScope false
+                if (success) {
+                    Log.d(TAG, "transcodeMediaFile: '${item.name}' transcoded -- exporting ${outputFile.length() / 1024} KiB to the source directory")
+                    val published = publishToSourceDirectory(item, outputFile)
+                    if (published != null) {
+                        Log.d(TAG, "Transcode finished. File preserved at: $published")
+                        // Diagnostic only, and after the export so that nothing it does -- or
+                        // how long it takes on a long film -- can hold the export up.
+                        try {
+                            scanVideoContinuity(outputFile, item.name)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.w(TAG, "transcodeMediaFile: continuity scan of '${item.name}' failed (ignored): ${e.message}")
                         }
-
-                        var outcome: ChunkOutcome = ChunkOutcome.Failed
-                        var attempt = 0
-                        while (outcome != ChunkOutcome.Success && attempt <= maxRetriesPerChunk) {
-                            if (attempt > 0) {
-                                Log.w(TAG, "Chunked transcode: retrying chunk $i/$numChunks for '${item.name}' (attempt ${attempt + 1}, previous=$outcome)")
-                                delay(RETRY_DELAY_MS)
-                            }
-                            // A timeout retried against the identical budget fails the
-                            // same way, so it gets double the budget on its one retry.
-                            // An outright failure isn't a budget problem and keeps the
-                            // normal one.
-                            val budgetMultiplier = if (outcome == ChunkOutcome.TimedOut) 2 else 1
-                            val chunkTimeoutMs = Budget.forChunk(chunkDurMs, strategy, resolution) * budgetMultiplier
-                            outcome = transcodeChunk(
-                                item, chunkStartMs, chunkDurMs, targetVideoCodec, resolution, videoBitrateKbps, audioLeg, chunkFile, chunkTimeoutMs, strategy,
-                                durationToleranceMs = toleranceMs,
-                                sessionId = sessionId, startsAtVerifiedKeyframe = startsAtVerifiedKeyframe
-                            )
-                            attempt++
-                            // Retrying into an exhausted codec pool cannot succeed -- every
-                            // attempt fails the same way until the process restarts -- so
-                            // this stops the transcode rather than spending the remaining
-                            // retry proving it. Logged distinctly so it greps apart from an
-                            // ordinary chunk failure.
-                            if (outcome != ChunkOutcome.Success && consecutiveCodecAllocationFailures.get() >= CODEC_EXHAUSTION_FAILURE_LIMIT) {
-                                Log.e(TAG, "Chunked transcode: codec pool exhausted -- aborting '${item.name}' rather than retrying into it (${consecutiveCodecAllocationFailures.get()} consecutive allocation failure(s))")
-                                return@coroutineScope false
-                            }
-                            // Likewise a retry cannot conjure audio that failed.
-                            if (outcome != ChunkOutcome.Success && audioUnavailable(audioLeg, chunkStartMs, chunkDurMs)) break
-                        }
-
-                        Log.d(TAG, "Chunked transcode: '${item.name}' chunk $i/$numChunks [${chunkStartMs}ms +${chunkDurMs}ms] $outcome (size=${chunkFile.length()})")
-                        if (outcome != ChunkOutcome.Success) {
-                            Log.e(TAG, "Chunked transcode: giving up on '${item.name}' after chunk $i failed ($outcome)")
-                            return@coroutineScope false
-                        }
-                        chunkFiles.add(chunkFile)
-                        val chunkProbe = probeMedia(chunkFile)
-                        val measuredVideoMs = chunkProbe?.videoDurationMs
-                        if (measuredVideoMs == null) {
-                            Log.w(TAG, "Chunked transcode: '${item.name}' chunk $i -- couldn't re-probe the video-track duration, using nominal ${chunkDurMs}ms instead")
-                        }
-                        chunkNominalDurationsMs.add(chunkDurMs)
-                        chunkVideoDurationsMs.add(measuredVideoMs ?: chunkDurMs)
-                        chunkAudioFirstTicks.add(audioFirstTickFor(audioLeg, chunkStartMs, chunkDurMs))
-                        // CHECK -- per chunk, right as it's collected: the video track's
-                        // measured length against the window it was asked to cover. Not
-                        // used for placement (see above), but it is the one number that
-                        // says how this chunk's video meets the next: short by more than
-                        // half a frame means the seam holds this chunk's last frame for
-                        // that long, and nothing downstream can repair a missing frame.
-                        val videoDeltaMs = chunkVideoDurationsMs.last() - chunkDurMs
-                        val halfFrame = halfFrameMs(chunkProbe?.frameRate)
-                        Log.d(TAG, "Chunked transcode: '${item.name}' chunk $i duration check -- nominal=${chunkDurMs}ms video=${chunkVideoDurationsMs.last()}ms (delta=${videoDeltaMs}ms, half frame=${"%.1f".format(Locale.US, halfFrame)}ms)")
-                        if (videoDeltaMs < -halfFrame) {
-                            Log.w(TAG, "Chunked transcode: '${item.name}' chunk $i -- video ends ${-videoDeltaMs}ms before its window does; the seam after it will hold this chunk's last frame for about that long (a clip that ended early -- the cut in addAudioAndMux only removes frames, it cannot add them)")
-                        } else if (videoDeltaMs > halfFrame) {
-                            Log.w(TAG, "Chunked transcode: '${item.name}' chunk $i -- video still runs ${videoDeltaMs}ms past its window after the cut in addAudioAndMux; expected at most half a frame")
-                        }
-
-                        // CHECK -- A/V alignment inside the muxed chunk, from its
-                        // presentation timeline (edit lists applied -- what a demuxer
-                        // sees, including the fragmenting pass that reads this file
-                        // next): where video and audio each begin and end. The audio
-                        // slice is cut to start at ~0 in the chunk and is placed on its
-                        // packet grid afterwards, so the two should begin together here;
-                        // a gap between them is carried into every seam. Packet-level,
-                        // so no decode: cheap.
-                        val vPts = probeStreamFramePtsMsSorted(chunkFile, "v:0")
-                        val aPts = if (audioLeg != null) probeStreamFramePtsMsSorted(chunkFile, "a:0") else null
-                        // The first chunk's audio opens with the priming packet, at negative
-                        // time and hidden by its edit list; what matters for alignment is
-                        // where the first packet a viewer actually hears starts.
-                        val aAudibleFirst = aPts?.firstOrNull { it >= 0L }
-                        val avStartOffsetMs: Long? = if (vPts != null && aAudibleFirst != null) aAudibleFirst - vPts.first() else null
-                        Log.d(TAG, "Chunked transcode: '${item.name}' chunk $i A/V packet check -- " +
-                            "video first=${vPts?.firstOrNull()}ms last=${vPts?.lastOrNull()}ms n=${vPts?.size}; " +
-                            "audio first=${aPts?.firstOrNull()}ms (first audible=${aAudibleFirst}ms) last=${aPts?.lastOrNull()}ms n=${aPts?.size}; " +
-                            "start offset (first audible audio minus video)=${avStartOffsetMs}ms")
-                        if (avStartOffsetMs != null && Math.abs(avStartOffsetMs) > 5) {
-                            Log.w(TAG, "Chunked transcode: '${item.name}' chunk $i -- audio and video start ${avStartOffsetMs}ms apart (audio minus video) within the chunk itself; that offset is carried into every seam of the assembled file")
-                        }
+                    } else {
+                        Log.e(TAG, "Transcode succeeded but publishing failed.")
+                        finalSuccess = false
                     }
-
-                    val chunkStartOffsetsMs = chunkBoundaries.map { it.startMs - firstStartMs }
-                    val concatOk = concatChunksFragmented(
-                        chunkFiles, chunkStartOffsetsMs, chunkAudioFirstTicks, audioLeg?.progress?.value?.layout,
-                        chunkNominalDurationsMs, chunkVideoDurationsMs, finalOutputFile, item.name
-                    )
-                    val durationOk = concatOk && verifyAssembledDuration(finalOutputFile, totalDurationMs, item.name)
-                    // The audio is one track end to end, so this is a whole-file
-                    // check where it used to be per chunk: it has to be there at all,
-                    // and not drift from the video by more than the last chunk was
-                    // already allowed to come up short by. Anything wider is a
-                    // mux problem, but a false rejection here throws away the whole
-                    // transcode, hence the loose bound.
-                    val avOk = durationOk && (audioLeg == null || verifyMuxedAvSync(finalOutputFile, item.name, toleranceMs = FINAL_CHUNK_TOLERANCE_MS))
-                    if (concatOk) {
-                        // Where the seams are, as timestamps to jump to when assessing the
-                        // output by eye and ear. Instant, so it comes before the scan below.
-                        val seamLayout = audioLeg?.progress?.value?.layout
-                        logSeamMap(
-                            item.name, firstStartMs, chunkStartOffsetsMs.drop(1),
-                            videoGapsMs = (1 until numChunks).map { n ->
-                                chunkStartOffsetsMs[n] - (chunkStartOffsetsMs[n - 1] + chunkVideoDurationsMs[n - 1])
-                            },
-                            audioAfterSeamMs = (1 until numChunks).map { n ->
-                                val tick = chunkAudioFirstTicks[n]
-                                if (tick == null || seamLayout == null) null
-                                else (tick - seamLayout.keptPrimingTicks) * 1000.0 / seamLayout.timescale - chunkStartOffsetsMs[n]
-                            }
-                        )
-                        // CHECK -- the definitive per-seam one: reads the assembled
-                        // file's own packet timestamps in a window around every
-                        // internal chunk boundary and reports each gap or overlap
-                        // between consecutive packets, per track, mapped to the seam
-                        // it belongs to. Runs whether or not the duration check above
-                        // passed -- most valuable when it didn't.
-                        scanAssembledSeams(finalOutputFile, chunkStartOffsetsMs.drop(1), item.name)
-                    }
-                    return@coroutineScope avOk
-                } finally {
-                    // However the chunk loop ended, nothing more needs the audio:
-                    // stop the encode (killing its ffmpeg) so the scope can complete
-                    // now rather than when the whole film's audio is done.
-                    audioLeg?.cancel()
-                }
-            }
-        } finally {
-            chunkFiles.forEach { it.delete() }
-            audioLegRawFile(item, sessionId).delete()
-            releaseSourceMirror(item)
-        }
-    }
-
-    /** Stream-copy remux via ffmpeg's concat demuxer -- no re-encode, just
-     *  folds the N chunk files' sample data into one coherent moov/sample
-     *  table, written directly to [outputFile].
-     *
-     *  No longer called from [transcodeInChunks] -- superseded by
-     *  [concatChunksFragmented], which places each chunk where the source
-     *  puts it instead of asking this function's `-f concat` demuxer to
-     *  infer placement from container metadata. Left in place as a
-     *  reference/rollback point rather than deleted. */
-    private suspend fun concatChunks(chunkFiles: List<File>, outputFile: File, itemName: String): Boolean {
-        if (chunkFiles.isEmpty()) return false
-        val listFile = File(durableWorkDir, "concat_${System.currentTimeMillis()}.txt")
-        return try {
-            listFile.writeText(chunkFiles.joinToString("\n") { "file '${it.absolutePath.replace("'", "'\\''")}'" })
-            val args = listOf(
-                ffmpegPath, "-y", "-hide_banner", "-v", "warning",
-                "-f", "concat", "-safe", "0", "-i", listFile.absolutePath,
-                "-c", "copy", "-movflags", "+faststart",
-                "-f", "mp4", outputFile.absolutePath
-            )
-            // Stream-copy work, budgeted by the size actually being moved rather
-            // than a flat 120s -- a 20GB concat and a 200MB one were held to the
-            // same number before.
-            val timeoutMs = Budget.forStreamCopy(chunkFiles.sumOf { it.length() })
-            val result = runProcessCapture(args, timeoutMs = timeoutMs)
-            val ok = result.succeededWriting(outputFile)
-            Log.d(TAG, "Chunked transcode: concat for '$itemName' ${if (ok) "OK" else "FAILED"} (exitCode=${result.exitCode}, budget=${timeoutMs}ms, size=${outputFile.length()})")
-            ok
-        } catch (e: Exception) {
-            Log.e(TAG, "Chunked transcode: concat for '$itemName' threw: ${e.message}", e)
-            false
-        } finally {
-            listFile.delete()
-        }
-    }
-
-    /**
-     * Assembles [chunkFiles] (each a complete, standalone, already-verified
-     * progressive mp4 with its video and, if the item has any, its audio
-     * slice) into [outputFile], without asking ffmpeg's concat demuxer to
-     * infer where each one belongs.
-     *
-     * Three passes:
-     *  1. Wrap each chunk as a fragmented mp4 (empty moov + moof/mdat, same
-     *     movflags the live-streaming path already ships) -- a plain stream
-     *     copy, one per chunk, that changes container structure only. Done
-     *     here rather than by asking [transcodeChunk] for fragmented output
-     *     in the first place so every existing per-chunk check keeps running
-     *     exactly as it does today -- [verifyChunkDuration],
-     *     [verifyMuxedAvSync] and [verifyChunkStartAlignment] for hw_ffmpeg
-     *     all still run against the ordinary progressive file they were
-     *     written against. Asking transcodeChunk for fragmented=true
-     *     directly would have changed more than the container: for
-     *     transcodeViaHardwareFfmpeg that flag also switches -copyts+-to off
-     *     in favor of a relative -t, which is what verifyChunkStartAlignment
-     *     depends on -- reusing it here would have silently dropped
-     *     hw_ffmpeg's own start-alignment verification in file-save mode.
-     *     (The same pass normalises a chunk whose timestamps carry the
-     *     source position, as hw_ffmpeg's -copyts legs do, back to start at
-     *     zero; the log in pass 2 shows each chunk's own start so a chunk
-     *     that didn't get normalised can't go unnoticed.)
-     *  2. Splice chunk 0 whole, then every later chunk's own moof/mdat
-     *     fragments ([findFirstMoofOffset] skips its stripped ftyp/moov),
-     *     each patched to its real position via [patchFragmentTimestamps]:
-     *     video at [chunkStartOffsetsMs] -- the chunk's nominal start, which
-     *     is where its keyframe sits in the source -- and audio at
-     *     [chunkAudioFirstTicks], the exact packet-grid time of its slice's
-     *     first packet ([chunkPlacementTicks]). This is the mechanism already
-     *     verified end-to-end on the streaming path; see that function's doc
-     *     comment. What changed is the *source* of the offsets: they used to
-     *     be a running sum of each chunk's measured container duration, which
-     *     is right only if every chunk's two tracks come out exactly as long
-     *     as each other and as nominal -- and made every chunk's rounding
-     *     error everyone else's drift. Nominal positions don't accumulate
-     *     anything. [chunkVideoDurationsMs] and [chunkNominalDurationsMs]
-     *     therefore place nothing; they let the log say, per seam, how the
-     *     chunk's video actually meets the next one (a positive gap is a held
-     *     frame, a negative one an overlap).
-     *  3. Remux (stream copy) the spliced fragmented file into a normal
-     *     +faststart progressive mp4 -- the same container shape
-     *     [concatChunks] produced, for the same playback compatibility. This
-     *     pass reads one already-continuous, already-correctly-timestamped
-     *     file, so it carries none of the multi-file duration-inference risk
-     *     the old concat demuxer had.
-     *
-     * No fallback to [concatChunks] on failure: that function is the
-     * mechanism this one exists to stop using, so falling back to it on a
-     * bad day would silently reintroduce the exact bug class this function
-     * removes. A failure here fails the whole transcode loudly instead, same
-     * posture as every other rejection in this file.
-     */
-    private suspend fun concatChunksFragmented(
-        chunkFiles: List<File>,
-        chunkStartOffsetsMs: List<Long>,
-        chunkAudioFirstTicks: List<Long?>,
-        audioLayout: AudioLayout?,
-        chunkNominalDurationsMs: List<Long>,
-        chunkVideoDurationsMs: List<Long>,
-        outputFile: File,
-        itemName: String
-    ): Boolean {
-        if (chunkFiles.isEmpty() ||
-            chunkFiles.size != chunkStartOffsetsMs.size ||
-            chunkFiles.size != chunkAudioFirstTicks.size ||
-            chunkFiles.size != chunkNominalDurationsMs.size ||
-            chunkFiles.size != chunkVideoDurationsMs.size) {
-            Log.e(TAG, "concatChunksFragmented: '$itemName' -- ${chunkFiles.size} chunk file(s) but " +
-                "${chunkStartOffsetsMs.size}/${chunkAudioFirstTicks.size}/${chunkNominalDurationsMs.size}/${chunkVideoDurationsMs.size} " +
-                "start offset(s)/audio placement(s)/nominal/video duration(s), refusing to splice mismatched lists")
-            return false
-        }
-
-        val fragmentedFiles = mutableListOf<File>()
-        val splicedFile = File(durableWorkDir, "spliced_${System.currentTimeMillis()}.mp4")
-        try {
-            // Pass 1: wrap each chunk as a fragmented mp4.
-            for ((index, chunkFile) in chunkFiles.withIndex()) {
-                val fragmented = File(durableWorkDir, "frag_${chunkFile.nameWithoutExtension}.mp4")
-                // Chunk 0 is the one whose audio opens with the priming packet and
-                // the edit list that hides it, and its moov is the one the whole
-                // file inherits: this re-wrap has to hand both on, which needs the
-                // same two things as the mux that made them (see remuxVideoAndAudio).
-                val keepsPriming = index == 0 && audioLayout?.keepsPriming == true
-                val args = mutableListOf(ffmpegPath, "-y", "-hide_banner", "-v", "warning", "-i", chunkFile.absolutePath, "-c", "copy")
-                if (keepsPriming) args.addAll(listOf("-avoid_negative_ts", "disabled"))
-                args.addAll(listOf(
-                    "-movflags", "frag_keyframe+${if (keepsPriming) "delay_moov" else "empty_moov"}+default_base_moof",
-                    "-f", "mp4", fragmented.absolutePath
-                ))
-                val result = runProcessCapture(args, timeoutMs = Budget.forStreamCopy(chunkFile.length()))
-                if (!result.succeededWriting(fragmented)) {
-                    Log.e(TAG, "concatChunksFragmented: '$itemName' -- failed to fragment chunk $index (exitCode=${result.exitCode}): ${result.stderr}")
-                    return false
-                }
-                // CHECK -- fragmenting pass, per chunk: confirms this step
-                // didn't silently shrink or empty a chunk on its way to
-                // becoming spliceable.
-                Log.d(TAG, "concatChunksFragmented: '$itemName' chunk $index fragmented OK (${chunkFile.length()} -> ${fragmented.length()} bytes)")
-                fragmentedFiles.add(fragmented)
-            }
-
-            if (audioLayout?.keepsPriming == true) {
-                // Confirm chunk 0's re-wrap kept the declaration: it is what lets
-                // players skip the priming packet in the finished file.
-                val declared = readAudioEditListStartTicks(fragmentedFiles.first())
-                if (declared == null || declared <= 0L) {
-                    Log.w(TAG, "concatChunksFragmented: '$itemName' -- chunk 0's re-wrap lost the audio's priming declaration (media_time=$declared); the assembled file's audio will play about one packet late")
                 } else {
-                    Log.d(TAG, "concatChunksFragmented: '$itemName' chunk 0 keeps the priming declaration through the re-wrap (media_time=$declared ticks)")
+                    Log.e(TAG, "transcodeMediaFile: '${item.name}' did not transcode successfully -- nothing to export")
                 }
+            } finally {
+                if (outputFile.exists()) outputFile.delete()
             }
-
-            // readTrackTimescales only needs to run once: "same item, same
-            // codec, same settings, for the life of the session" (its own doc
-            // comment, written for the streaming case, applies identically
-            // here -- every chunk was encoded against the same target
-            // codec/resolution).
-            val trackTimescales = readTrackTimescales(fragmentedFiles.first())
-            if (trackTimescales.isEmpty()) {
-                Log.e(TAG, "concatChunksFragmented: '$itemName' -- couldn't read chunk 0's track timescales, cannot splice safely")
-                return false
-            }
-            val audioTrackId = readAudioTrackId(fragmentedFiles.first())
-            if (audioLayout != null && audioTrackId == null) {
-                Log.e(TAG, "concatChunksFragmented: '$itemName' -- the audio leg exists but chunk 0 has no audio track; refusing to splice a video-only file")
-                return false
-            }
-            // CHECK -- confirms both tracks (video, audio) were actually
-            // found before splicing 80-odd fragments against whatever was.
-            Log.d(TAG, "concatChunksFragmented: '$itemName' track timescales read from chunk 0: $trackTimescales (audio track id=$audioTrackId, audio leg timescale=${audioLayout?.timescale})")
-
-            // Pass 2: splice, patching every chunk after the first to its
-            // real position.
-            RandomAccessFile(splicedFile, "rw").use { out ->
-                for ((index, fragFile) in fragmentedFiles.withIndex()) {
-                    val placement: Map<Int, Long> = if (index > 0) {
-                        chunkPlacementTicks(trackTimescales, audioTrackId, audioLayout?.timescale, chunkStartOffsetsMs[index], chunkAudioFirstTicks[index])
-                    } else emptyMap()
-                    // CHECK -- read each track's first tfdt back from the file
-                    // itself, before and after patching. patchFragmentTimestamps
-                    // fails open by design (a chunk it can't parse is left
-                    // exactly as it was, with only a log line), which is the
-                    // right call for a live stream and the wrong one to be
-                    // silent about here: an unpatched chunk restarts its
-                    // timeline at zero, which is the original bug. Reading back
-                    // what is actually in the bytes settles whether the offset
-                    // we asked for is the offset that was written, per track.
-                    val tfdtBefore: Map<Int, Long> = readFirstFragmentDecodeTimesMs(fragFile, trackTimescales)
-                    if (index > 0) patchFragmentTimestamps(fragFile, placement)
-                    val tfdtAfter = readFirstFragmentDecodeTimesMs(fragFile, trackTimescales)
-                    Log.d(TAG, "concatChunksFragmented: '$itemName' chunk $index first tfdt (ms per track id) before=$tfdtBefore after=$tfdtAfter" +
-                        if (index > 0) " (offset requested, in ticks per track id: $placement)" else " (chunk 0, unpatched)")
-                    // Placement ADDS an offset to wherever the chunk's own fragments
-                    // start, so it lands correctly only if they start at ~zero. The
-                    // muxed chunks do; one that doesn't (a leg that kept absolute
-                    // source timestamps through pass 1, say) would be placed late by
-                    // exactly its own start.
-                    for ((trackId, beforeMs) in tfdtBefore) {
-                        if (Math.abs(beforeMs) > CHUNK_START_ALIGNMENT_TOLERANCE_MS) {
-                            Log.w(TAG, "concatChunksFragmented: '$itemName' chunk $index -- track $trackId's own timeline starts at ${beforeMs}ms, not ~0; it will be placed that much late")
-                        }
-                    }
-                    if (index > 0) {
-                        if (tfdtAfter.isEmpty() || tfdtBefore.isEmpty()) {
-                            Log.w(TAG, "concatChunksFragmented: '$itemName' chunk $index -- couldn't read tfdt boxes back (before=${tfdtBefore.size} track(s), after=${tfdtAfter.size}); cannot confirm the patch was applied")
-                        }
-                        for ((trackId, afterMs) in tfdtAfter) {
-                            val beforeMs = tfdtBefore[trackId] ?: continue
-                            val timescale = trackTimescales[trackId] ?: continue
-                            val requestedMs = (placement[trackId] ?: 0L) * 1000.0 / timescale
-                            val appliedMs = afterMs - beforeMs
-                            if (Math.abs(appliedMs - requestedMs) > 1.5) {
-                                Log.w(TAG, "concatChunksFragmented: '$itemName' chunk $index -- track $trackId's tfdt moved ${appliedMs}ms, but ${String.format(Locale.US, "%.2f", requestedMs)}ms was requested; this chunk's timeline is not where it was told to be")
-                            }
-                        }
-                    }
-                    val skipOffset = if (index == 0) 0L else findFirstMoofOffset(fragFile)
-                    var bytesAppended = 0L
-                    RandomAccessFile(fragFile, "r").use { raf ->
-                        raf.seek(skipOffset)
-                        val buf = ByteArray(65536)
-                        while (true) {
-                            val n = raf.read(buf)
-                            if (n == -1) break
-                            out.write(buf, 0, n)
-                            bytesAppended += n
-                        }
-                    }
-                    // CHECK -- after each chunk's fragment is merged: where it was
-                    // placed, and how its video meets the next chunk's. A positive
-                    // seam gap is the video coming up short of its window (the next
-                    // chunk starts after this one's last frame ends: the muxer holds
-                    // that frame to cover it), a negative one is an overlap the cut
-                    // in addAudioAndMux should have prevented. Neither compounds --
-                    // the next chunk is placed by the source, not by this one's end --
-                    // so this is a per-seam observation, not a running total.
-                    val placedAtMs = chunkStartOffsetsMs[index]
-                    val seamGapMs = if (index < chunkFiles.lastIndex) chunkStartOffsetsMs[index + 1] - (placedAtMs + chunkVideoDurationsMs[index]) else null
-                    Log.d(TAG, "concatChunksFragmented: '$itemName' chunk $index merged -- video placed@${placedAtMs}ms, audio placed@tick ${chunkAudioFirstTicks[index]} " +
-                        "($bytesAppended bytes appended, spliced file now ${out.filePointer} bytes)" +
-                        (if (seamGapMs != null) " -- seam to chunk ${index + 1}: video gap=${seamGapMs}ms (nominal ${chunkNominalDurationsMs[index]}ms, video ${chunkVideoDurationsMs[index]}ms)" else " -- last chunk"))
-                    if (seamGapMs != null && Math.abs(seamGapMs) > SEAM_VIDEO_GAP_WARN_MS) {
-                        Log.w(TAG, "concatChunksFragmented: '$itemName' chunk $index -- the seam to the next chunk is ${if (seamGapMs > 0) "a ${seamGapMs}ms HOLD (this chunk's last frame is stretched to cover it)" else "a ${-seamGapMs}ms OVERLAP"}")
-                    }
-                }
-            }
-
-            // Pass 3: remux to a normal progressive file.
-            val args = listOf(
-                ffmpegPath, "-y", "-hide_banner", "-v", "warning",
-                "-i", splicedFile.absolutePath,
-                "-c", "copy", "-movflags", "+faststart",
-                "-f", "mp4", outputFile.absolutePath
-            )
-            val timeoutMs = Budget.forStreamCopy(splicedFile.length())
-            val result = runProcessCapture(args, timeoutMs = timeoutMs)
-            val ok = result.succeededWriting(outputFile)
-            Log.d(TAG, "concatChunksFragmented: '$itemName' final remux ${if (ok) "OK" else "FAILED"} (exitCode=${result.exitCode}, budget=${timeoutMs}ms, size=${outputFile.length()})")
-            if (ok && audioLayout?.keepsPriming == true) {
-                val declared = readAudioEditListStartTicks(outputFile)
-                if (declared == null || declared <= 0L) {
-                    Log.w(TAG, "concatChunksFragmented: '$itemName' -- the FINAL file's audio has no priming declaration (media_time=$declared): players will play the priming packet and the audio will run about one packet late")
-                } else {
-                    Log.d(TAG, "concatChunksFragmented: '$itemName' final file declares the audio priming (media_time=$declared ticks) -- video untouched")
-                }
-            }
-            if (!ok) Log.e(TAG, "concatChunksFragmented: '$itemName' remux stderr: ${result.stderr}")
-            return ok
-        } catch (e: Exception) {
-            Log.e(TAG, "concatChunksFragmented: '$itemName' threw: ${e.message}", e)
-            return false
-        } finally {
-            fragmentedFiles.forEach { it.delete() }
-            splicedFile.delete()
+            return finalSuccess
         }
     }
 
@@ -3005,85 +1651,28 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
     }
 
     /**
-     * Logs where every internal seam of an assembled file is, as timestamps
-     * of the output -- the chunk boundaries, where one chunk's video ends and
-     * the next begins -- so the result can be assessed in real life: open the
-     * file, jump to each, and look and listen across it. One line per seam
-     * (grep `SEAM`), then a summary naming the ones worth the trouble.
+     * Confirms the finished [outputFile] actually covers [expectedTotalMs].
      *
-     * What each line says besides where the seam is:
-     *  - the video gap: how far the next chunk's first frame sits from where
-     *    the previous chunk's last frame ends. Positive means the previous
-     *    chunk's video came up short and its last frame is held for that long
-     *    (a pause on screen); negative an overlap. Under about two frames is
-     *    ordinary quantisation and not flagged.
-     *  - how long after the seam the first audio packet of the new chunk's
-     *    slice starts: always under one packet, and not a defect -- the audio
-     *    is one continuous stream, with no seam of its own, and its packets
-     *    tile straight through. It is there so a click at a seam can be told
-     *    apart from a timing offset.
-     *
-     * The output timeline is the source's (video is never shifted), so
-     * `at` is also where the same moment sits in the source, less the range's
-     * start (`src` adds it back).
-     */
-    private fun logSeamMap(
-        itemName: String,
-        rangeStartMs: Long,
-        seamOffsetsMs: List<Long>,
-        videoGapsMs: List<Long>,
-        audioAfterSeamMs: List<Double?>
-    ) {
-        if (seamOffsetsMs.isEmpty()) {
-            Log.i(TAG, "SEAM MAP '$itemName': a single chunk, no internal seams")
-            return
-        }
-        val flagged = ArrayList<String>()
-        for ((n, offsetMs) in seamOffsetsMs.withIndex()) {
-            val gapMs = videoGapsMs.getOrNull(n)
-            val audioMs = audioAfterSeamMs.getOrNull(n)
-            val verdict = when {
-                gapMs == null -> "unmeasured"
-                gapMs > SEAM_VIDEO_GAP_WARN_MS -> "HOLD"
-                gapMs < -SEAM_VIDEO_GAP_WARN_MS -> "OVERLAP"
-                else -> "ok"
-            }
-            Log.i(TAG, "SEAM #${n + 1}/${seamOffsetsMs.size} '$itemName' at ${formatTimestamp(offsetMs)} (src ${formatTimestamp(rangeStartMs + offsetMs)}) -- " +
-                "video gap ${gapMs?.let { String.format(Locale.US, "%+d", it) } ?: "?"}ms, " +
-                "audio slice starts ${audioMs?.let { String.format(Locale.US, "%+.1f", it) } ?: "n/a"}ms after the seam -- $verdict")
-            if (verdict == "HOLD" || verdict == "OVERLAP") flagged.add("#${n + 1} at ${formatTimestamp(offsetMs)} ($verdict ${gapMs}ms)")
-        }
-        Log.i(TAG, "SEAM SUMMARY '$itemName': ${seamOffsetsMs.size} seam(s), first at ${formatTimestamp(seamOffsetsMs.first())}, last at ${formatTimestamp(seamOffsetsMs.last())}; " +
-            if (flagged.isEmpty()) "none with a video hold or overlap beyond ${SEAM_VIDEO_GAP_WARN_MS}ms"
-            else "${flagged.size} worth looking at: ${flagged.joinToString("; ")}")
-    }
-
-    /**
-     * Confirms the fully assembled [outputFile] actually covers
-     * [expectedTotalMs] before [transcodeInChunks] reports success. Every
-     * chunk that reaches [concatChunksFragmented] already passed
-     * [verifyChunkDuration] on its own -- this is the composite check that
-     * per-chunk verification structurally cannot do. [patchFragmentTimestamps]'
-     * own doc comment already found this exact gap on the streaming path:
-     * "verifyChunkDuration/verifyOutputResolution/verifyMuxedAvSync can't see
-     * this defect and tightening them can't catch it either: every chunk file
-     * is completely correct in isolation... it's the composite byte stream
-     * this section assembles afterward where the problem lives, and none of
-     * those checks ever look at that." This is that check for the file-save
-     * side.
+     * The encoders' own legs are judged for coverage as they finish (a leg that
+     * ends early is failed there -- Media3 Transformer's video-only export can
+     * complete cleanly, no exception, having produced only a fraction of the
+     * requested duration, androidx/media#758). This is the check on the file
+     * that actually ships, after the merge and the final remux: the one place
+     * a lost or duplicated stretch introduced by either would show.
      *
      * Also logs the video and audio tracks' own durations next to the
      * container's, because the container reports whichever is longer: a total
-     * that's off says something is wrong, the per-track split says which
-     * track it's on. (That split is what would have shown the original
-     * overrun to be one-sided from the first run.)
+     * that's off says something is wrong, the per-track split says which track
+     * it's on.
      *
-     * A rejection here has no cheap retry (unlike a single chunk, redoing the
-     * whole transcode is expensive), so a failure here is meant as a loud
-     * signal to investigate rather than something to build automatic retry
-     * logic around -- with [concatChunksFragmented] replacing the old
-     * duration-inference concat, this should rarely if ever fire; its job at
-     * that point is catching a regression, not handling a normal case.
+     * A rejection here has no cheap retry (the whole transcode would have to be
+     * redone), so it is meant as a loud signal to investigate rather than
+     * something to build automatic retry logic around. Overrun is judged
+     * against a wider bar than shortfall ([CHUNK_OVERRUN_TOLERANCE_MS] against
+     * [CHUNK_DURATION_TOLERANCE_MS]) on purpose: a false rejection throws away
+     * a finished transcode, and overrun has legitimate sources (encoder
+     * padding, clip-end rounding). Don't collapse the two into one symmetric
+     * tolerance.
      */
     private suspend fun verifyAssembledDuration(
         outputFile: File,
@@ -3094,9 +1683,10 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
     ): Boolean {
         val probe = probeMedia(outputFile)
         val containerMs = probe?.formatDurationMs
-        // The video track decides how long the file is, for the reason given
-        // in verifyChunkDuration; the container reports whichever track is
-        // longer, which is usually the audio by up to a packet.
+        // The video track says how long the file is, not whichever track is
+        // longest: the audio runs a little past the video by construction (an
+        // AAC encode ends on a packet boundary), and a measure that followed it
+        // could let a short video through.
         val actualMs = probe?.videoDurationMs ?: containerMs
         if (probe == null || actualMs == null) {
             Log.e(TAG, "verifyAssembledDuration: '$itemName' ffprobe could not read duration of assembled ${outputFile.absolutePath}")
@@ -3109,179 +1699,17 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         val shortfallMs = expectedTotalMs - actualMs
         val ok = shortfallMs <= toleranceMs && -shortfallMs <= overrunToleranceMs
         Log.d(TAG, "verifyAssembledDuration: '$itemName' expected=${expectedTotalMs}ms actual=${actualMs}ms shortfall=${shortfallMs}ms ${if (ok) "OK" else "MISMATCH"}")
-        // The failure thresholds above are the per-chunk ones, deliberately loose
-        // (a false rejection here throws away a finished transcode) -- but loose
-        // enough that a 21ms-per-chunk error only trips them ~48 chunks in, and
-        // passes outright on a short file. So there's a second, quieter tier that
-        // never fails anything: anything past a couple of frames on the assembled
-        // file is drift worth seeing, however small.
+        // The failure thresholds above are deliberately loose (a false rejection
+        // throws away a finished transcode), so there's a second, quieter tier
+        // that never fails anything: anything past a couple of frames on the
+        // finished file is worth seeing, however small.
         if (ok && Math.abs(shortfallMs) > ASSEMBLED_DRIFT_WARN_MS) {
-            Log.w(TAG, "verifyAssembledDuration: '$itemName' within tolerance but ${Math.abs(shortfallMs)}ms ${if (shortfallMs > 0) "short" else "long"} -- more than the ~${ASSEMBLED_DRIFT_WARN_MS}ms a clean assembly lands within (the trailing audio packet accounts for under 10); see the scanAssembledSeams lines for where it accrues")
+            Log.w(TAG, "verifyAssembledDuration: '$itemName' within tolerance but ${Math.abs(shortfallMs)}ms ${if (shortfallMs > 0) "short" else "long"} -- more than the ~${ASSEMBLED_DRIFT_WARN_MS}ms a clean assembly lands within (the trailing audio packet accounts for under 10)")
         }
         if (!ok) {
-            Log.e(TAG, "verifyAssembledDuration: '$itemName' assembled output is ${kotlin.math.abs(shortfallMs)}ms ${if (shortfallMs > 0) "SHORTER" else "LONGER"} than the sum of its chunks -- concatenation lost or duplicated content that every individual chunk check passed")
+            Log.e(TAG, "verifyAssembledDuration: '$itemName' assembled output is ${kotlin.math.abs(shortfallMs)}ms ${if (shortfallMs > 0) "SHORTER" else "LONGER"} than the range that was asked for -- the merge or the final remux lost or duplicated content")
         }
         return ok
-    }
-
-    /**
-     * CHECK: reads the assembled [outputFile]'s own packet timestamps in a
-     * window around every internal chunk boundary ([seamTimesMs], the
-     * cumulative nominal end of each chunk but the last) and reports, per
-     * track, what the finished file actually does at each seam. Three kinds of
-     * finding, because a discontinuity can hide in a progressive mp4 in more
-     * than one way:
-     *  - GAP / OVERLAP: consecutive packets whose timestamps don't tile.
-     *  - STRETCHED: a packet whose duration is well over the stream's typical
-     *    one. A progressive mp4 derives sample durations from timestamp
-     *    deltas, so when a chunk is placed late the muxer doesn't leave a hole
-     *    -- it lengthens the last frame before it to cover the gap, and a
-     *    gap-only scan reports the file as continuous. (Found by simulating
-     *    this pipeline: the defective file's last frame before each seam ran
-     *    61ms against a 40ms frame, with zero gaps reported.)
-     *  - SEAM LANDING: the seam's actual position against the nominal one --
-     *    where the stretched video frame ends, or how far the nearest video
-     *    packet sits from the nominal seam. (The audio is one continuous
-     *    encode, so it has no seams of its own to land: its packets should
-     *    tile unbroken straight through every one.)
-     *
-     * Windows start 1s before each seam and run 8s from there (ffprobe ends a
-     * "START%+N" window N seconds after the requested start, and begins
-     * reading at the keyframe before it, so video windows open a little
-     * early). Wide on purpose: a seam placed late by accumulated drift --
-     * 21ms x 79 seams is ~1.7s by the end of the episode this was written
-     * against -- sits well past its nominal position, and a window centred on
-     * the nominal seam would stop short of it. Packet-level (no decode) and
-     * bounded to the windows, so it costs seconds rather than a pass over the
-     * whole file. Overlapping windows (chunks shorter than ~10s) would list
-     * packets twice; they're de-duplicated by timestamp. Log-only: reports,
-     * never rejects.
-     */
-    private suspend fun scanAssembledSeams(outputFile: File, seamTimesMs: List<Long>, itemName: String) {
-        if (seamTimesMs.isEmpty()) return
-        fun f2(x: Double): String = String.format(Locale.US, "%.2f", x)
-        fun f3(x: Double): String = String.format(Locale.US, "%.3f", x)
-        val intervals = seamTimesMs.joinToString(",") { seamMs ->
-            "${Math.max(0L, seamMs - 1000L) / 1000.0}%+8.0"
-        }
-        fun nearestSeam(atMs: Double): IndexedValue<Long>? =
-            seamTimesMs.withIndex().minByOrNull { Math.abs(it.value - atMs) }
-
-        for ((label, selector) in listOf("video" to "v:0", "audio" to "a:0")) {
-            val args = listOf(
-                ffprobePath, "-hide_banner", "-v", "error",
-                "-select_streams", selector,
-                "-read_intervals", intervals,
-                "-show_entries", "packet=pts_time,duration_time",
-                "-of", "csv=p=0", outputFile.absolutePath
-            )
-            val result = runProcessCapture(args, timeoutMs = Budget.forStreamCopy(outputFile.length()))
-            if (result.exitCode != 0) {
-                Log.w(TAG, "scanAssembledSeams: '$itemName' $label -- ffprobe failed (exitCode=${result.exitCode}), skipping: ${result.stderr.take(300)}")
-                continue
-            }
-            // (pts seconds, duration seconds or null when the container gave none)
-            val raw = ArrayList<Pair<Double, Double?>>()
-            for (line in result.stdout.lineSequence()) {
-                val fields = line.split(',')
-                val pts = fields.getOrNull(0)?.let { FFPROBE_NUMBER_REGEX.find(it)?.value?.toDoubleOrNull() } ?: continue
-                val dur = fields.getOrNull(1)?.let { FFPROBE_NUMBER_REGEX.find(it)?.value?.toDoubleOrNull() }
-                raw.add(pts to dur)
-            }
-            raw.sortBy { it.first }
-            val pkts = ArrayList<Pair<Double, Double?>>()
-            for (p in raw) if (pkts.isEmpty() || p.first - pkts.last().first > 0.0000005) pkts.add(p)
-            if (pkts.size < 2) {
-                Log.w(TAG, "scanAssembledSeams: '$itemName' $label -- only ${pkts.size} packet(s) read around ${seamTimesMs.size} seam(s), cannot check continuity")
-                continue
-            }
-            val knownDurs = pkts.mapNotNull { it.second }.filter { it > 0.0 }.sorted()
-            val typical: Double? = if (knownDurs.isEmpty()) null else knownDurs[knownDurs.size / 2]
-
-            var gapCount = 0; var gapTotalMs = 0.0; var gapMaxMs = 0.0
-            var overlapCount = 0; var overlapTotalMs = 0.0; var overlapMaxMs = 0.0
-            var stretchCount = 0; var stretchTotalMs = 0.0; var stretchMaxMs = 0.0
-            var logged = 0
-            for (i in 0 until pkts.size) {
-                val cur = pkts[i]
-                val curDur = cur.second
-                // Stretched: duration well past the stream's typical one.
-                if (typical != null && curDur != null && curDur > typical * 1.5) {
-                    val extraMs = (curDur - typical) * 1000.0
-                    stretchCount++; stretchTotalMs += extraMs; stretchMaxMs = Math.max(stretchMaxMs, extraMs)
-                    if (logged < 40) {
-                        logged++
-                        val endMs = (cur.first + curDur) * 1000.0
-                        val seam = nearestSeam(endMs)
-                        Log.w(TAG, "scanAssembledSeams: '$itemName' $label STRETCHED packet at ${f3(cur.first)}s: duration ${f2(curDur * 1000.0)}ms against a typical ${f2(typical * 1000.0)}ms " +
-                            "(+${f2(extraMs)}ms of timeline absorbed into it); it ends at ${f2(endMs)}ms, nearest nominal seam is #${seam?.index} @${seam?.value}ms (delta=${seam?.let { f2(endMs - it.value) }}ms)")
-                    }
-                }
-                // Shortened packet (audio only in practice). The audio is one
-                // continuous encode, so the only short packet expected is the
-                // file's own last, nowhere near a seam. One that sits on a seam
-                // is a chunk whose audio was cut to its own end -- what encoding
-                // audio per chunk used to leave behind, and a sign something has
-                // gone back to doing that.
-                if (label == "audio" && typical != null && curDur != null && curDur < typical * 0.9) {
-                    val endMs = (cur.first + curDur) * 1000.0
-                    val seam = nearestSeam(endMs)
-                    if (seam != null && Math.abs(endMs - seam.value) < 500.0) {
-                        val deltaMs = endMs - seam.value
-                        Log.d(TAG, "scanAssembledSeams: '$itemName' audio chunk ${seam.index} ends at ${f2(endMs)}ms vs nominal seam ${seam.value}ms (delta=${f2(deltaMs)}ms)")
-                        if (Math.abs(deltaMs) > 2.0 && logged < 40) {
-                            logged++
-                            Log.w(TAG, "scanAssembledSeams: '$itemName' audio seam #${seam.index} lands ${f2(deltaMs)}ms from nominal")
-                        }
-                    }
-                }
-                if (i == 0) continue
-                val prev = pkts[i - 1]
-                if (cur.first - prev.first > 5.0) continue // a new window, not a neighbour
-                val prevDur = prev.second ?: continue
-                val gapMs = (cur.first - (prev.first + prevDur)) * 1000.0
-                if (Math.abs(gapMs) <= 1.0) continue
-                if (gapMs > 0) {
-                    gapCount++; gapTotalMs += gapMs; gapMaxMs = Math.max(gapMaxMs, gapMs)
-                } else {
-                    overlapCount++; overlapTotalMs += -gapMs; overlapMaxMs = Math.max(overlapMaxMs, -gapMs)
-                }
-                if (logged < 40) {
-                    logged++
-                    val seam = nearestSeam(cur.first * 1000.0)
-                    Log.w(TAG, "scanAssembledSeams: '$itemName' $label ${if (gapMs > 0) "GAP" else "OVERLAP"} of ${f2(Math.abs(gapMs))}ms " +
-                        "between packets at ${f3(prev.first)}s and ${f3(cur.first)}s -- nearest seam is #${seam?.index} @${seam?.value}ms")
-                }
-            }
-
-            // Video seam landing: a chunk's first frame is a source keyframe placed at
-            // the nominal seam, so some video packet should sit on it. Nearest one
-            // further than a couple of ms away means the seam isn't where it should be.
-            var offSeams = 0
-            var worstOffMs = 0.0
-            if (label == "video") {
-                for ((idx, seamMs) in seamTimesMs.withIndex()) {
-                    val nearest = pkts.minByOrNull { Math.abs(it.first * 1000.0 - seamMs) } ?: continue
-                    val deltaMs = nearest.first * 1000.0 - seamMs
-                    if (Math.abs(deltaMs) > 2.0) {
-                        offSeams++
-                        if (Math.abs(deltaMs) > Math.abs(worstOffMs)) worstOffMs = deltaMs
-                        if (logged < 40) {
-                            logged++
-                            Log.w(TAG, "scanAssembledSeams: '$itemName' video seam #$idx -- nearest packet is at ${f3(nearest.first)}s, ${f2(deltaMs)}ms from the nominal seam @${seamMs}ms")
-                        }
-                    }
-                }
-            }
-
-            val clean = gapCount + overlapCount + stretchCount + offSeams == 0
-            Log.d(TAG, "scanAssembledSeams: '$itemName' $label -- ${pkts.size} packets around ${seamTimesMs.size} seam(s), typical duration ${typical?.let { f2(it * 1000.0) }}ms: " +
-                "$gapCount gap(s) totalling ${f2(gapTotalMs)}ms (max ${f2(gapMaxMs)}ms), " +
-                "$overlapCount overlap(s) totalling ${f2(overlapTotalMs)}ms (max ${f2(overlapMaxMs)}ms), " +
-                "$stretchCount stretched packet(s) totalling ${f2(stretchTotalMs)}ms (max ${f2(stretchMaxMs)}ms)" +
-                (if (label == "video") ", $offSeams seam(s) off the nominal position (worst ${f2(worstOffMs)}ms)" else "") +
-                if (clean) " -- continuous and on position at every seam" else "")
-        }
     }
 
     /**
@@ -3349,6 +1777,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
     private fun publishToSourceDirectory(item: MediaCollection.MediaNode.Item, tempFile: File): String? {
         val baseName = item.name.substringBeforeLast('.', item.name)
         val targetName = "transcoded_$baseName.mp4"
+        Log.d(TAG, "Publish: '${item.name}' -> '$targetName' (${tempFile.length() / 1024} KiB; source is ${item.uri.scheme}:, ${item.uri})")
 
         val sourceFilePath = item.uri.path
         if (item.uri.scheme == "file" && sourceFilePath != null) {
@@ -3375,7 +1804,11 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             val target = File(parentDir, targetName)
             return try {
                 tempFile.copyTo(target, overwrite = true)
-                Log.d(TAG, "Publish: copied to ${target.absolutePath} (size=${target.length()})")
+                if (target.length() != tempFile.length()) {
+                    Log.e(TAG, "Publish: ${target.absolutePath} holds ${target.length()} bytes, not the ${tempFile.length()} that were copied -- the export is incomplete (left in place for inspection)")
+                    return null
+                }
+                Log.d(TAG, "Publish: copied to ${target.absolutePath} (size=${target.length()}, verified)")
                 // (E4b) Without this the file is invisible to the gallery and
                 // any other app browsing media until the next full system
                 // scan -- which, for a user's own gallery app, could be never.
@@ -3422,6 +1855,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                 Log.e(TAG, "Publish: DocumentFile.createFile failed for $targetName in $parentUri")
                 return null
             }
+            Log.d(TAG, "Publish: copying ${tempFile.length() / 1024} KiB into $parentUri as $targetName")
             val opened = context.contentResolver.openOutputStream(newDoc.uri)?.use { out ->
                 tempFile.inputStream().use { input -> input.copyTo(out) }
                 true
@@ -3430,7 +1864,14 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                 Log.e(TAG, "Publish: could not open output stream for ${newDoc.uri}")
                 return null
             }
-            Log.d(TAG, "Publish: copied to ${newDoc.uri} (size=${newDoc.length()})")
+            // Confirm what arrived, not just that the copy returned: a provider that accepted
+            // the stream and kept less is exactly the "finished, but nothing there" failure.
+            val written = newDoc.length()
+            if (written != tempFile.length()) {
+                Log.e(TAG, "Publish: ${newDoc.uri} holds $written bytes, not the ${tempFile.length()} that were copied -- the export is incomplete (left in place for inspection)")
+                return null
+            }
+            Log.d(TAG, "Publish: copied to ${newDoc.uri} (size=$written, verified)")
             newDoc.uri.toString()
         } catch (e: Exception) {
             Log.e(TAG, "Publish: SAF copy failed: ${e.message}", e)
@@ -3509,7 +1950,18 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                 return null
             }
             resolver.update(itemUri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
-            Log.d(TAG, "publishViaMediaStore: copied to $itemUri (relativePath=$relativePath, size=${tempFile.length()})")
+            // Confirm what arrived, from the file itself rather than the (lagging) MediaStore row.
+            var written = -1L
+            try {
+                resolver.openFileDescriptor(itemUri, "r")?.use { pfd -> written = pfd.statSize }
+            } catch (e: Exception) {
+                Log.w(TAG, "publishViaMediaStore: could not read back the size of $itemUri: ${e.message}")
+            }
+            if (written >= 0L && written != tempFile.length()) {
+                Log.e(TAG, "publishViaMediaStore: $itemUri holds $written bytes, not the ${tempFile.length()} that were copied -- the export is incomplete (left in place for inspection)")
+                return null
+            }
+            Log.d(TAG, "publishViaMediaStore: copied to $itemUri (relativePath=$relativePath, size=${tempFile.length()}, destination reports ${if (written >= 0L) written.toString() else "unknown"})")
             itemUri.toString()
         } catch (e: Exception) {
             Log.e(TAG, "publishViaMediaStore: write failed for $itemUri: ${e.message}", e)
@@ -3571,15 +2023,12 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * without keeping that risk on a device that's already tight on space.
      *
      * The cost when the gate says no: pipe:0 is forward-only. Anything
-     * relying on `-ss` before `-i` for fast input-seeking -- chunked
-     * transcoding especially, see [transcodeViaHardwareFfmpeg] and
-     * [transcodeAudioTrack] -- has to decode-and-discard from byte 0 up to
-     * its start offset on every call. For a movie split into chunks, a late
-     * chunk can mean minutes of wasted decode just to reach its own start
-     * point. It also makes the keyframe probe in [probeKeyframeTimestampsMs]
-     * more likely to come back empty (see that function's doc comment) --
-     * both are the expected, logged trade-off of a low-space device, not a
-     * bug.
+     * relying on `-ss` before `-i` for fast input-seeking -- a streaming
+     * seek, see [transcodeVideoLegViaHardwareFfmpeg] and [transcodeAudioTrack]
+     * -- has to decode-and-discard from byte 0 up to its start offset on every
+     * call, which for a late seek can mean minutes of wasted decode just to
+     * reach the start point. That is the expected, logged trade-off of a
+     * low-space device, not a bug.
      *
      * (Why not hand ffmpeg a raw fd or a /proc/self/fd/<n> path instead of
      * piping, and keep real seeking without a copy? Already tried: ffmpeg
@@ -3723,45 +2172,223 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         }
     }
 
-    private suspend fun transcodeViaHardwareFfmpeg(
+    // =====================================================================
+    // The single-pass pipeline.
+    //
+    // One video encode and one audio encode, each over the whole range and
+    // each written as a fragmented mp4, merged into the output by
+    // FragmentAssembler while they are still being written. There is no
+    // chunking: nothing is cut, re-timed or joined between the encoders and
+    // the output, which is what the chunked design could not promise at its
+    // seams.
+    //
+    // Saving to a file: both encoders write FILES that are tailed as they
+    // grow. The merge goes to a temporary fragmented file, and one
+    // stream-copy remux at the end makes the final progressive file.
+    //
+    // Streaming: both encoders write PIPES (FIFOs), the merge goes straight
+    // to the client, and whatever has been served is dropped. Nothing
+    // accumulates on disk, and a slow client holds the encoders back through
+    // the pipes instead of letting them run ahead.
+    // =====================================================================
+
+    /** Where a leg's encoder writes: a file in the work directory, or a FIFO there when the leg is piped. */
+    private fun legPath(item: MediaCollection.MediaNode.Item, sessionId: String, kind: String, pipe: Boolean): File =
+        File(durableWorkDir, "${kind}_leg_${item.id}_$sessionId.${if (pipe) "fifo" else "mp4"}")
+
+    private fun createFifo(path: File) {
+        path.delete()
+        Os.mkfifo(path.absolutePath, FIFO_MODE)
+    }
+
+    /** Counts what reaches the sink and remembers whether the sink itself failed -- the one failure no
+     *  other plan can fix, since it is the far end (a renderer that went away, a full disk) that is broken. */
+    private class CountingSink(private val delegate: OutputStream) : OutputStream() {
+        var bytes = 0L
+            private set
+        var failed = false
+            private set
+
+        override fun write(b: Int) { guard { delegate.write(b) }; bytes++ }
+        override fun write(b: ByteArray, off: Int, len: Int) { guard { delegate.write(b, off, len) }; bytes += len }
+        override fun flush() { guard { delegate.flush() } }
+        override fun close() {} // the delegate belongs to whoever opened it
+
+        private inline fun guard(block: () -> Unit) {
+            try { block() } catch (e: IOException) { failed = true; throw e }
+        }
+    }
+
+    private class PipelineRun(
+        val assembly: AssemblyResult,
+        /** The audio leg's presentation start inside its own media timeline (its encoder-delay packet), in ticks; null without audio. */
+        val audioPrimingTicks: Long?,
+        /** A write to the sink failed: the far end is gone, and trying again elsewhere would meet the same wall. */
+        val sinkFailed: Boolean
+    )
+
+    /** One way of running the legs: which encoder makes the video, and whether the legs travel through pipes. */
+    private class LegPlan(val videoStrategy: String, val pipes: Boolean) {
+        override fun toString() = "$videoStrategy/${if (pipes) "pipe" else "file"}"
+    }
+
+    /**
+     * The plans to try, in order, for a run of [strategy].
+     *
+     * A run moves on to the next plan only if the one before it failed before
+     * the first byte reached the output -- an encoder that cannot handle the
+     * source, or a pipe that cannot be used. Once output exists there is no
+     * second plan: a failure then fails the transcode (a half-written run cannot
+     * be continued by a different encoder, whose codec configuration would
+     * differ, and re-doing hours of work behind the caller's back is not what
+     * was asked for).
+     *
+     * Streaming pipes its legs, and each encoder is tried with pipes first, then
+     * with ordinary temp files: where pipes cannot be used (Media3's muxer
+     * writing into one is the combination not yet seen working on a device) the
+     * stream still plays, with files that grow with the film instead of nothing.
+     */
+    private fun legPlans(strategy: String, streaming: Boolean): List<LegPlan> {
+        val encoders = if (strategy == "hw_ffmpeg") listOf("hw_ffmpeg", "safe") else listOf("safe")
+        val plans = ArrayList<LegPlan>()
+        for (encoder in encoders) {
+            plans += LegPlan(encoder, pipes = streaming)
+            if (streaming) plans += LegPlan(encoder, pipes = false)
+        }
+        return plans
+    }
+
+    /**
+     * One complete pass of the pipeline over the range starting at
+     * [rangeStartMs]: starts the audio leg and a video leg, merges them into
+     * [sink] as they are written, and tears both down however it ends. Raw leg
+     * files and FIFOs never outlive the call.
+     *
+     * [limitMs] is an explicit length for the range (null: to the end of the
+     * source); [totalDurationMs] is how much is *expected* -- it sizes the
+     * budgets and is what a leg's coverage is judged against, so a leg that
+     * stops early without any error is caught as truncated.
+     */
+    private suspend fun runLegsOnce(
+        item: MediaCollection.MediaNode.Item,
+        plan: LegPlan,
+        targetVideoCodec: Constants.Transcoder.VideoCodec,
+        resolution: Constants.Transcoder.Resolution,
+        videoBitrateKbps: Int,
+        targetAudioCodec: Constants.Transcoder.AudioCodec,
+        audioBitrateBps: Int,
+        audioTrackIndex: Int,
+        rangeStartMs: Long,
+        limitMs: Long?,
+        totalDurationMs: Long,
+        sessionId: String,
+        sink: OutputStream
+    ): PipelineRun {
+        val videoPath = legPath(item, sessionId, "video", plan.pipes)
+        val audioPath = legPath(item, sessionId, "audio", plan.pipes)
+        val counting = CountingSink(sink)
+        fun failedRun(reason: String) =
+            PipelineRun(AssemblyResult(false, counting.bytes, 0, 0L, null, null, reason), null, counting.failed)
+        videoPath.delete()
+        audioPath.delete()
+        try {
+            val hasAudio = itemHasAudio(item, audioTrackIndex)
+            if (plan.pipes) {
+                createFifo(videoPath)
+                if (hasAudio) createFifo(audioPath)
+            }
+            return coroutineScope {
+                val videoLeg = FragmentLeg(FragmentLeg.Kind.VIDEO, "video leg [$plan]", videoPath, plan.pipes)
+                val audioLeg = if (hasAudio) FragmentLeg(FragmentLeg.Kind.AUDIO, "audio leg [$plan]", audioPath, plan.pipes) else null
+                if (audioLeg == null) Log.d(TAG, "runLegsOnce: '${item.name}' has no audio track -- video only")
+                // Media3's fragmented writer lets the video timeline drift; the Safe Path records the
+                // timestamps its muxer is handed and the leg re-times itself from them.
+                val sampleTimes = SampleTimes()
+                if (plan.videoStrategy != "hw_ffmpeg") videoLeg.timeCorrector = FragmentTimeCorrector(sampleTimes, videoLeg.label)
+                try {
+                    launchLeg(videoLeg, STREAM_LEAD_MS, VIDEO_LEG_STALL_ABORT_MS, totalDurationMs, FINAL_CHUNK_TOLERANCE_MS) {
+                        if (plan.videoStrategy == "hw_ffmpeg") {
+                            transcodeVideoLegViaHardwareFfmpeg(
+                                item, targetVideoCodec, resolution, videoBitrateKbps, videoLeg,
+                                startTimeMs = rangeStartMs, durationMs = limitMs,
+                                timeoutMs = Budget.forVideo(totalDurationMs, "hw_ffmpeg", resolution)
+                            )
+                        } else {
+                            transcodeVideoLegViaSafePath(
+                                item, targetVideoCodec, resolution, videoLeg, sampleTimes,
+                                offsetMs = rangeStartMs, limitDurationMs = limitMs,
+                                timeoutMs = Budget.forVideo(totalDurationMs, "hybrid", resolution)
+                            )
+                        }
+                    }
+                    if (audioLeg != null) {
+                        launchLeg(audioLeg, STREAM_LEAD_MS, null, totalDurationMs, FINAL_CHUNK_TOLERANCE_MS) {
+                            transcodeAudioTrack(
+                                item, audioPath,
+                                durationS = limitMs?.let { it / 1000.0 },
+                                startTimeMs = rangeStartMs,
+                                encoder = targetAudioCodec.encoderId,
+                                audioBitrateBps = audioBitrateBps,
+                                audioTrackIndex = audioTrackIndex,
+                                timeoutMs = Budget.forAudio(totalDurationMs),
+                                written = { audioLeg.outputBytes() }
+                            )
+                        }
+                    }
+                    val assembly = FragmentAssembler(videoLeg, audioLeg, item.name, ASSEMBLER_STARTUP_WAIT_MS).run(counting)
+                    PipelineRun(assembly, audioLeg?.header?.editStartTicks, counting.failed)
+                } finally {
+                    // Whatever ended the run -- done, failed, the client leaving -- the encoders stop with it.
+                    videoLeg.cancel()
+                    audioLeg?.cancel()
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "runLegsOnce [$plan]: '${item.name}' threw ${e.javaClass.simpleName}: ${e.message}", e)
+            return failedRun("${e.javaClass.simpleName}: ${e.message}")
+        } finally {
+            videoPath.delete()
+            audioPath.delete()
+        }
+    }
+
+    /**
+     * The video leg through ffmpeg's hardware path: ONE encode of the whole
+     * range into [leg]'s fragmented mp4 (a file, or a FIFO when streaming).
+     *
+     * `frag_keyframe+empty_moov` is what makes the output readable while it is
+     * still being written -- a moov up front, then a self-contained fragment
+     * per GOP -- and `default_base_moof` keeps each fragment's offsets relative
+     * to itself so it can be copied elsewhere unchanged. No `-copyts`: the leg
+     * is normalised to start at zero (`avoid_negative_ts make_zero`) exactly as
+     * the audio leg is, which is what puts the two on one timeline when they
+     * are merged. `-flush_packets 1` so a fragment reaches the reader as soon
+     * as it is cut.
+     */
+    private suspend fun transcodeVideoLegViaHardwareFfmpeg(
         item: MediaCollection.MediaNode.Item,
         targetVideo: Constants.Transcoder.VideoCodec,
         resolution: Constants.Transcoder.Resolution,
         videoBitrateKbps: Int,
-        audioLeg: AudioLeg?,
-        outputFile: File,
+        leg: FragmentLeg,
         startTimeMs: Long,
         durationMs: Long?,
-        timeoutMs: Long,
-        fragmented: Boolean = false,
-        sessionId: String
-    ): ChunkOutcome {
+        timeoutMs: Long
+    ): Boolean {
         val input = resolveFfmpegInputPath(item)
         val sourceMetadata = probeSourceMedia(item, input)
         val outputBox = resolveOutputBox(item, resolution)
         val paddedOutputBox = PixelSize(alignUpForEncoder(outputBox.width), alignUpForEncoder(outputBox.height))
-        // Video-only: audio used to be mapped and encoded in this same call,
-        // but that meant this call's own -copyts (needed below, for
-        // verifyChunkStartAlignment) applied to the audio stream too --
-        // confirmed directly to silently reintroduce a compounding audio
-        // drift (~394ms over 9 chunks), since -copyts is a global option with
-        // no per-stream opt-out. Audio now always goes through addAudioAndMux
-        // instead, the same as the safe path -- see its doc comment for why
-        // that's also simpler, not just a workaround for this.
-        val videoOnlyFile = File(durableWorkDir, "hwffmpeg_video_${item.id}_$sessionId.mp4")
 
         val args = mutableListOf(
             ffmpegPath, "-y", "-hide_banner", "-hwaccel", "mediacodec",
             "-ndk_codec", "1", // applies to the decoder for -i, below -- see the matching flag after -c:v
-            // (13) genpts regenerates missing/broken presentation timestamps --
-            // camcorder exports and files that have already been through another
-            // lossy transcode are the common real-world source. (14)
-            // analyzeduration/probesize give the demuxer a bigger window to get
-            // container structure right on unusual muxing than ffmpeg's default
-            // probe budget allows; probeSourceMedia's own ffprobe pass already
-            // covers most of what this buys, but it's cheap insurance on the
-            // encode command itself too, particularly for the containers
-            // isUnstreamable already flags as trickier (AVI/WMV/ASF/TS/MPEG).
+            // genpts regenerates missing/broken presentation timestamps (camcorder exports and
+            // files already through another lossy transcode); analyzeduration/probesize give the
+            // demuxer a bigger window on unusual muxing -- cheap insurance, particularly for the
+            // containers isUnstreamable already flags as trickier (AVI/WMV/ASF/TS/MPEG).
             "-fflags", "+genpts",
             "-analyzeduration", "20M", "-probesize", "20M"
         )
@@ -3773,379 +2400,335 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             "-ndk_codec", "1" // applies to the encoder for -c:v, above -- not a duplicate of the flag before -i
         ))
         args.addAll(encoderTuningArgs(targetVideo, resolution, sourceMetadata.frameRate))
-        // (10) Tag the output with whatever color metadata the source actually
-        // declared -- see colorMetadataArgs' doc comment for exactly what this
-        // does and does not do.
         args.addAll(colorMetadataArgs(sourceMetadata))
-        // The streaming (fragmented) case is unchanged: relative -t duration,
-        // timestamps reset near zero by avoid_negative_ts make_zero, corrected
-        // downstream by patchFragmentTimestamps against the live session's own
-        // offset -- that path is already verified against a real bug and
-        // doesn't need a second, different fix layered on top of it.
-        //
-        // The file-save case instead asks for an ABSOLUTE end (-to, not -t)
-        // and keeps real source-relative timestamps in the output (-copyts):
-        // -t measures duration from ffmpeg's internal seek origin, which
-        // -copyts's whole point is to stop normalizing to zero, and mixing
-        // the two silently corrupts the output (confirmed directly: -copyts
-        // with -t here produces "PTS has no value" / non-monotonic DTS
-        // garbage; -copyts with -to does not -- this isn't a matter of
-        // taste). The payoff is verifyChunkStartAlignment below: with real
-        // timestamps preserved, this chunk's own first frame can be checked
-        // against startTimeMs directly, rather than trusting that whatever
-        // `-ss` + mediacodec hwaccel decoded actually landed where it was
-        // asked to.
-        if (fragmented) {
-            if (durationMs != null) args.addAll(listOf("-t", (durationMs / 1000.0).toString()))
-        } else {
-            args.add("-copyts")
-            if (durationMs != null) args.addAll(listOf("-to", ((startTimeMs + durationMs) / 1000.0).toString()))
-        }
-        if (fragmented) args.addAll(listOf("-movflags", "frag_keyframe+empty_moov+default_base_moof"))
-        // (13) avoid_negative_ts handles containers/encoders that legitimately
-        // produce negative timestamps. make_zero is right for the fragmented
-        // case (it wants to start at zero); it would fight -copyts's whole
-        // purpose on the file-save case, so that one only shifts if a
-        // timestamp is genuinely negative. max_muxing_queue_size no longer
-        // matters here now that audio isn't interleaved in this same call,
-        // but it's harmless to leave for the single (video) stream.
-        args.addAll(listOf("-avoid_negative_ts", if (fragmented) "make_zero" else "make_non_negative", "-max_muxing_queue_size", "1024"))
-        args.addAll(listOf("-f", "mp4", videoOnlyFile.absolutePath))
+        if (durationMs != null) args.addAll(listOf("-t", (durationMs / 1000.0).toString()))
+        args.addAll(listOf(
+            "-flush_packets", "1",
+            "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+            "-avoid_negative_ts", "make_zero", "-max_muxing_queue_size", "1024",
+            "-f", "mp4", leg.path.absolutePath
+        ))
 
-        Log.d(TAG, "HW ffmpeg: Starting video-only transcode to ${videoOnlyFile.absolutePath}, input=${input.path}, source=${item.resolution}@${sourceMetadata.frameRate ?: "?"}fps, fit=$outputBox, padded=$paddedOutputBox, budget=${timeoutMs}ms, fragmented=$fragmented (${diagnosticSnapshot()})")
+        Log.d(TAG, "HW ffmpeg: Starting the video leg to ${leg.path.absolutePath} (${if (leg.isPipe) "pipe" else "file"}), input=${input.path}, source=${item.resolution}@${sourceMetadata.frameRate ?: "?"}fps, fit=$outputBox, padded=$paddedOutputBox, budget=${timeoutMs}ms (${diagnosticSnapshot()})")
         val result = runProcessCapture(args, timeoutMs = timeoutMs, stdinSource = input.stdinSource)
-        val success = result.succeededWriting(videoOnlyFile)
-        Log.d(TAG, "HW ffmpeg: Video-only leg finished success=$success, exitCode=${result.exitCode}, timedOut=${result.timedOut}, size=${videoOnlyFile.length()}, ${diagnosticSnapshot()}")
-        // timedOut was already known here and thrown away by a Boolean return.
-        // The retry loop needs it: a timeout retried against the same budget
-        // fails the same way, where a larger budget might not.
-        val videoOutcome = when {
-            !success -> if (result.timedOut) ChunkOutcome.TimedOut else ChunkOutcome.Failed
-            // No seek happened, so there's nothing whose landing needs
-            // checking: this chunk covers its input from true frame zero by
-            // construction. Also skips the fragmented case, which never
-            // carries real timestamps to check in the first place (see above).
-            fragmented || startTimeMs == 0L -> ChunkOutcome.Success
-            verifyChunkStartAlignment(videoOnlyFile, startTimeMs, item.name) -> ChunkOutcome.Success
-            else -> ChunkOutcome.Failed
-        }
-        if (videoOutcome != ChunkOutcome.Success) {
-            videoOnlyFile.delete()
-            return videoOutcome
-        }
-        return addAudioAndMux(
-            item, videoOnlyFile, outputFile, audioLeg, offsetMs = startTimeMs, limitDurationMs = durationMs,
-            frameRate = sourceMetadata.frameRate, fragmented = fragmented
-        )
+        val success = result.exitCode == 0 && leg.outputBytes() > 0
+        Log.d(TAG, "HW ffmpeg: Video leg finished success=$success, exitCode=${result.exitCode}, timedOut=${result.timedOut}, bytes=${leg.outputBytes()}, ${diagnosticSnapshot()}")
+        if (!success) Log.e(TAG, "HW ffmpeg: video leg stderr: ${result.stderr.takeLast(1500)}")
+        return success
     }
 
     /**
-     * Confirms [outputFile] -- produced by the `-ss`-seeked, `-copyts`'d
-     * encode just above -- actually starts at [expectedStartMs], not merely
-     * that it has the right duration. verifyChunkDuration cannot see this
-     * class of bug: a chunk that starts a few frames too early and is then
-     * cut to its full nominal length reports exactly the requested duration
-     * while silently re-covering content the previous chunk already
-     * produced, which is duplicated video at the seam once both chunks are
-     * concatenated. ffmpeg's own accurate-seek (on by default here, since
-     * neither this call nor any other in this file passes
-     * `-noaccurate_seek`) is reliable for this exact seek-then-encode
-     * sequence in plain software decode -- confirmed directly, not assumed:
-     * fed the same keyframe-snapped boundaries this file computes, encoded
-     * with the same `-ss`-before-`-i` placement, concatenated the same way,
-     * against a frame-indexed reference file, with zero frames dropped or
-     * duplicated. What that test cannot reach is `-hwaccel mediacodec`
-     * decode on real device hardware, which is a materially different code
-     * path inside ffmpeg, and which this file's own history already shows
-     * is where this app's ffmpeg-related surprises live. Rather than assume
-     * the software result transfers, this checks every seeked chunk and
-     * lets a bad one fall back to the safe path (already hardened
-     * separately -- see setStartsAtKeyFrame in transcodeViaSafePath) instead
-     * of shipping it.
-     *
-     * The tolerance is deliberately wide: a chunk's true first frame can
-     * legitimately land tens of milliseconds after [expectedStartMs] on its
-     * own -- confirmed directly, again, not assumed -- because an encoder
-     * with B-frames enabled has its own small initial reorder delay, and
-     * that delay is visible in the timestamps even when nothing about the
-     * seek was wrong. [CHUNK_START_ALIGNMENT_TOLERANCE_MS] sits comfortably
-     * above that noise floor and comfortably below the smallest plausible
-     * wrong-keyframe error (at least one whole missed GOP -- seconds, not
-     * tens of milliseconds, for any realistic source).
+     * Stream-copies the merged fragmented file into a normal progressive mp4
+     * (`+faststart`): the same file the chunked path used to end with, so
+     * everything downstream -- the library scan, serving with Range requests --
+     * sees what it always has. Both tracks are copied untouched, so this is
+     * also where the audio's priming declaration is checked to have survived.
      */
-    private suspend fun verifyChunkStartAlignment(outputFile: File, expectedStartMs: Long, itemName: String): Boolean {
-        val actualStartMs = probeFirstFramePtsMs(outputFile)
-        if (actualStartMs == null) {
-            Log.w(TAG, "verifyChunkStartAlignment: '$itemName' -- couldn't probe ${outputFile.name} to verify alignment, trusting it rather than failing a chunk over a probe issue")
+    private suspend fun remuxToProgressive(assembledFile: File, outputFile: File, itemName: String, expectPrimingDeclared: Boolean): Boolean {
+        val args = listOf(
+            ffmpegPath, "-y", "-hide_banner", "-v", "warning",
+            "-i", assembledFile.absolutePath,
+            "-c", "copy", "-movflags", "+faststart",
+            "-f", "mp4", outputFile.absolutePath
+        )
+        val timeoutMs = Budget.forStreamCopy(assembledFile.length())
+        val result = runProcessCapture(args, timeoutMs = timeoutMs)
+        val ok = result.succeededWriting(outputFile)
+        Log.d(TAG, "remuxToProgressive: '$itemName' final remux ${if (ok) "OK" else "FAILED"} (exitCode=${result.exitCode}, budget=${timeoutMs}ms, size=${outputFile.length()})")
+        if (!ok) {
+            Log.e(TAG, "remuxToProgressive: '$itemName' remux stderr: ${result.stderr}")
+            return false
+        }
+        if (expectPrimingDeclared) {
+            val declared = readAudioEditListStartTicks(outputFile)
+            if (declared == null || declared <= 0L) {
+                Log.w(TAG, "remuxToProgressive: '$itemName' -- the FINAL file's audio has no priming declaration (media_time=$declared): players will play the priming packet and the audio will run about one packet late")
+            } else {
+                Log.d(TAG, "remuxToProgressive: '$itemName' final file declares the audio priming (media_time=$declared ticks)")
+            }
+        }
+        return true
+    }
+
+    /**
+     * CHECK, cheap enough to sit in front of the export: whether video and
+     * audio start together in the finished file, read from the first few
+     * packets of each stream. Nothing that decides whether the file ships may
+     * scale with its length -- a film has tens of thousands of frames -- so this
+     * never reads more than [START_PROBE_PACKETS] packets a stream.
+     *
+     * Returns false only for an offset beyond [AV_SYNC_TOLERANCE_MS], a sync
+     * error a viewer would see. Without audio there is nothing to be out of
+     * step with and nothing is probed.
+     */
+    private suspend fun verifyAssembledStart(file: File, itemName: String, hasAudio: Boolean): Boolean {
+        if (!hasAudio) return true
+        val videoStart = probeStreamFramePtsMsSorted(file, "v:0", firstPackets = START_PROBE_PACKETS)?.firstOrNull()
+        val audioStart = probeStreamFramePtsMsSorted(file, "a:0", firstPackets = START_PROBE_PACKETS)?.firstOrNull { it >= 0L }
+        if (videoStart == null || audioStart == null) {
+            Log.w(TAG, "verifyAssembledStart: '$itemName' -- couldn't read the first packet timestamps (video=$videoStart, audio=$audioStart), skipping the start check")
             return true
         }
-        val deltaMs = actualStartMs - expectedStartMs
-        val ok = kotlin.math.abs(deltaMs) <= CHUNK_START_ALIGNMENT_TOLERANCE_MS
-        if (!ok) {
-            Log.w(TAG, "verifyChunkStartAlignment: '$itemName' -- chunk requested at ${expectedStartMs}ms actually starts at ${actualStartMs}ms (${deltaMs}ms off, tolerance ${CHUNK_START_ALIGNMENT_TOLERANCE_MS}ms) -- rejecting rather than shipping a chunk that overlaps or gaps its neighbor")
+        val offsetMs = audioStart - videoStart
+        Log.d(TAG, "verifyAssembledStart: '$itemName' first audible audio at ${audioStart}ms, first video frame at ${videoStart}ms (audio ${if (offsetMs >= 0) "after" else "before"} video by ${Math.abs(offsetMs)}ms)")
+        if (Math.abs(offsetMs) > AV_SYNC_TOLERANCE_MS) {
+            Log.e(TAG, "verifyAssembledStart: '$itemName' audio and video start ${Math.abs(offsetMs)}ms apart (limit ${AV_SYNC_TOLERANCE_MS}ms) -- treating as failure")
+            return false
         }
-        return ok
+        if (Math.abs(offsetMs) > AV_START_OFFSET_WARN_MS) {
+            Log.w(TAG, "verifyAssembledStart: '$itemName' audio and video start ${Math.abs(offsetMs)}ms apart -- within tolerance, but more than a frame")
+        }
+        return true
     }
 
     /**
-     * The minimum pts across every video frame in [file], in ms -- not the
-     * first packet in file/decode order, since B-frame reordering means
-     * those can differ: a GOP's first *decoded* packet is not necessarily
-     * its first *displayed* frame. Confirmed directly against a
-     * representative software H.264 encode with B-frames on (not this app's
-     * exact mediacodec settings, which a container without hardware codec
-     * access can't run, but the same class of encoder): on a fresh chunk
-     * with zero seek involved at all, first packet decode-order pts still
-     * landed at ~83ms, and the true minimum -- also ~83ms -- was several
-     * packets later in the stream, confirming this can happen with nothing
-     * about the seek wrong. Sorting rather than reading the first line is
-     * what makes this reliable either way. Returns null on any probe
-     * failure or an empty/unparseable result, rather than throwing, so a
-     * probe hiccup degrades to "trust the chunk" instead of failing it
-     * outright -- verifyChunkStartAlignment's caller decides what a null
-     * actually means for that chunk.
+     * DIAGNOSTIC, log-only: whether the finished file's video frames tile its
+     * timeline without holes or doubles, from every packet timestamp.
+     *
+     * Whole-file, so its cost grows with the film. That is why it runs only
+     * AFTER the file has been exported, where it cannot hold the export up, and
+     * why it never decides anything: a variable-frame-rate source legitimately
+     * has uneven intervals, and the point is that a held frame is visible in
+     * the log rather than only on a screen.
      */
-    private suspend fun probeFirstFramePtsMs(file: File): Long? {
-        val args = listOf(
-            ffprobePath, "-hide_banner", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "frame=pts_time", "-of", "csv=p=0", file.absolutePath
-        )
-        val result = runProcessCapture(args, timeoutMs = KEYFRAME_PROBE_TIMEOUT_MS)
-        if (result.exitCode != 0) return null
-        // Same regex-over-raw-stdout approach as
-        // probeKeyframeTimestampsMsViaFfprobe, not a per-line toDoubleOrNull:
-        // the ffprobe build used to test this emits a stray trailing comma on
-        // the first csv row of any `-show_entries frame=...` output (for any
-        // file, not just this one), which fails a strict per-line parse on
-        // exactly the frame most likely to be the minimum. Matching numeric
-        // substrings directly sidesteps that and whatever else csv=p=0 is
-        // liable to do across ffprobe builds.
-        return FFPROBE_NUMBER_REGEX.findAll(result.stdout)
-            .mapNotNull { it.value.toDoubleOrNull() }
-            .minOrNull()
-            ?.let { (it * 1000).toLong() }
+    private suspend fun scanVideoContinuity(file: File, itemName: String) {
+        val startedAt = System.currentTimeMillis()
+        val vPts = probeStreamFramePtsMsSorted(file, "v:0")
+        if (vPts == null || vPts.size < 2) {
+            Log.w(TAG, "scanVideoContinuity: '$itemName' -- couldn't read the video packet timestamps, skipping")
+            return
+        }
+        val deltas = LongArray(vPts.size - 1) { vPts[it + 1] - vPts[it] }
+        val median = deltas.sortedArray()[deltas.size / 2].coerceAtLeast(1L)
+        var held = 0
+        var doubled = 0
+        val examples = ArrayList<String>()
+        for (i in deltas.indices) {
+            val d = deltas[i]
+            if (d > median * VIDEO_CONTINUITY_GAP_FACTOR + 1) {
+                held++
+                if (examples.size < 5) examples += "${formatTimestamp(vPts[i])} (+${d}ms)"
+            } else if (d * 2 < median) {
+                doubled++
+            }
+        }
+        val summary = "${vPts.size} frames, interval median ${median}ms, first at ${vPts.first()}ms, last at ${vPts.last()}ms, scanned in ${System.currentTimeMillis() - startedAt}ms"
+        if (held == 0 && doubled == 0) {
+            Log.d(TAG, "scanVideoContinuity: '$itemName' video continuous -- $summary")
+        } else {
+            Log.w(TAG, "scanVideoContinuity: '$itemName' video has $held held-frame gaps and $doubled doubled frames -- $summary; first gaps at ${examples.joinToString()}")
+        }
+    }
+
+
+    /**
+     * Saving to a file: the whole range in one pass, from the first byte of
+     * the source to the last, with nothing cut or joined on the way.
+     *
+     * Both encoders write fragmented mp4 files that are merged into a
+     * temporary fragmented file as they grow (the first portion after
+     * [ASSEMBLER_STARTUP_WAIT_MS], then each next portion as it completes);
+     * when both are done, one stream-copy remux makes the final file. The
+     * checks that follow run on that final file.
+     *
+     * A failure that happens before anything has been merged moves on to the
+     * next plan (the hardware encoder cannot take the source: try the
+     * Transformer). Any later failure -- an encoder dying or ending short
+     * part-way, a check failing -- fails the transcode.
+     */
+    private suspend fun transcodeSinglePass(
+        item: MediaCollection.MediaNode.Item,
+        targetVideoCodec: Constants.Transcoder.VideoCodec,
+        resolution: Constants.Transcoder.Resolution,
+        videoBitrateKbps: Int,
+        targetAudioCodec: Constants.Transcoder.AudioCodec,
+        audioBitrateBps: Int,
+        audioTrackIndex: Int,
+        finalOutputFile: File,
+        rangeStartMs: Long,
+        rangeDurationMs: Long?,
+        strategy: String
+    ): Boolean {
+        val sessionId = UUID.randomUUID().toString().take(8)
+        val totalDurationMs = rangeDurationMs ?: (resolveSourceDurationMs(item) - rangeStartMs)
+        if (totalDurationMs <= 0L) {
+            Log.e(TAG, "transcodeSinglePass: nothing to transcode for '${item.name}' (start=${rangeStartMs}ms, duration=${totalDurationMs}ms)")
+            return false
+        }
+        // Both legs read the source from its start. A content:// source is mirrored (room permitting)
+        // once, here, rather than raced by whichever leg gets there first; released when the run is over.
+        resolveFfmpegInputPath(item)
+        val targetSize = encodeTargetSize(item, resolution)
+        val plans = legPlans(strategy, streaming = false)
+        Log.d(TAG, "transcodeSinglePass: '${item.name}' -- ${totalDurationMs}ms from ${rangeStartMs}ms, one video encode + one audio encode merged as they are written (session=$sessionId, plans=$plans)")
+        try {
+            for ((attempt, plan) in plans.withIndex()) {
+                currentCoroutineContext().ensureActive()
+                if (attempt > 0) Log.w(TAG, "transcodeSinglePass: '${item.name}' -- starting again on [$plan]")
+                val assembledFile = File(durableWorkDir, "assembled_${item.id}_${sessionId}_$attempt.mp4")
+                assembledFile.delete()
+                finalOutputFile.delete()
+                try {
+                    val run = try {
+                        FileOutputStream(assembledFile).buffered().use { sink ->
+                            runLegsOnce(
+                                item, plan, targetVideoCodec, resolution, videoBitrateKbps,
+                                targetAudioCodec, audioBitrateBps, audioTrackIndex,
+                                rangeStartMs, rangeDurationMs, totalDurationMs, sessionId, sink
+                            )
+                        }
+                    } catch (e: IOException) {
+                        Log.e(TAG, "transcodeSinglePass: '${item.name}' -- could not write ${assembledFile.name}: ${e.message}", e)
+                        return false
+                    }
+                    val assembly = run.assembly
+                    if (!assembly.ok) {
+                        Log.e(TAG, "transcodeSinglePass: '${item.name}' [$plan] failed -- ${assembly.reason} (video reached ${assembly.videoEndMs}ms, audio ${assembly.audioEndMs}ms, of ${totalDurationMs}ms; ${assembly.bytesWritten} bytes merged)")
+                        if (assembly.bytesWritten > 0L || run.sinkFailed) return false
+                        continue
+                    }
+                    val hasAudio = assembly.audioEndMs != null
+                    val priming = run.audioPrimingTicks ?: 0L
+                    Log.d(TAG, "transcodeSinglePass: '${item.name}' [$plan] merged ${assembly.fragmentsWritten} fragments (${assembly.bytesWritten / 1024} KiB): video ${assembly.videoEndMs}ms, audio ${assembly.audioEndMs}ms, start offset ${assembly.startOffsetMs}ms, audio priming ${priming} ticks")
+
+                    if (!remuxToProgressive(assembledFile, finalOutputFile, item.name, expectPrimingDeclared = priming > 0L)) return false
+                    assembledFile.delete() // the final file now holds everything; free the space before the checks
+                    Log.d(TAG, "transcodeSinglePass: '${item.name}' final file written (${finalOutputFile.length() / 1024} KiB) -- checking it before it is exported")
+
+                    if (!verifyAssembledDuration(finalOutputFile, totalDurationMs, item.name, toleranceMs = FINAL_CHUNK_TOLERANCE_MS)) return false
+                    if (hasAudio && !verifyMuxedAvSync(finalOutputFile, item.name, toleranceMs = FINAL_CHUNK_TOLERANCE_MS)) return false
+                    if (!verifyAssembledStart(finalOutputFile, item.name, hasAudio)) return false
+                    // The Safe Path has already once ignored the requested size; confirm it was honoured.
+                    if (plan.videoStrategy == "safe" && targetSize != null && !verifyOutputResolution(finalOutputFile, targetSize, item.name)) {
+                        Log.e(TAG, "transcodeSinglePass: '${item.name}' -- the Safe Path ignored the requested output size -- treating as failure rather than shipping the wrong resolution")
+                        return false
+                    }
+                    Log.d(TAG, "transcodeSinglePass: '${item.name}' done -- ${finalOutputFile.length() / 1024} KiB via [$plan]")
+                    return true
+                } finally {
+                    assembledFile.delete()
+                }
+            }
+            return false
+        } finally {
+            releaseSourceMirror(item)
+        }
     }
 
     /**
-     * Every packet's presentation timestamp on the stream selected by
+     * The presentation timestamp of every packet on the stream selected by
      * [streamSelector] ("v:0", "a:0", ...) in [file], in ms, sorted ascending
      * -- not file order, since for video, B-frame reordering means decode
-     * order and display order differ (see [probeFirstFramePtsMs]'s doc
-     * comment for a confirmed example of exactly that, on this same kind of
-     * encode). One video frame per packet, so the packet list IS the frame
-     * list.
+     * order and display order differ (an encode with B-frames
+     * presents its first frame a couple of frame intervals after its decode
+     * time). One video frame per packet, so the packet list IS the frame
+     * list. With [firstPackets], only that many packets from the start of the
+     * file: all a start-of-file check needs, and cheap however long the file is.
      *
-     * Reads packets, not decoded frames. This used to run
-     * `-show_entries frame=pts_time`, which makes ffprobe decode the whole
-     * stream to report it: measured in this file's own logs at ~4s per call
-     * on a 720p chunk -- time spent decoding video to read timestamps that
-     * were sitting in the container's sample table the whole time.
+     * Reads packets, not decoded frames (`frame=pts_time` makes ffprobe decode
+     * the whole stream to report timestamps that were sitting in the
+     * container's sample table the whole time).
      *
      * Presentation timeline (edit lists applied): what a demuxer, and so a
-     * player, sees.
+     * player, sees. Negative values (an AAC priming packet) are kept negative.
      *
      * Null on any probe failure or an empty/unparseable result, same posture
      * as every other probeXxx function here -- callers decide what "couldn't
      * tell" means for them rather than this throwing.
      */
-    private suspend fun probeStreamFramePtsMsSorted(file: File, streamSelector: String): List<Long>? {
-        val args = listOf(
-            ffprobePath, "-hide_banner", "-v", "error",
-            "-select_streams", streamSelector,
-            "-show_entries", "packet=pts_time", "-of", "csv=p=0", file.absolutePath
-        )
+    private suspend fun probeStreamFramePtsMsSorted(file: File, streamSelector: String, firstPackets: Int? = null): List<Long>? {
+        val args = mutableListOf(ffprobePath, "-hide_banner", "-v", "error", "-select_streams", streamSelector)
+        // "%+#N": from the start of the file, N packets.
+        if (firstPackets != null) args.addAll(listOf("-read_intervals", "%+#$firstPackets"))
+        args.addAll(listOf("-show_entries", "packet=pts_time", "-of", "csv=p=0", file.absolutePath))
         val result = runProcessCapture(args, timeoutMs = KEYFRAME_PROBE_TIMEOUT_MS)
         if (result.exitCode != 0) return null
-        val pts = FFPROBE_NUMBER_REGEX.findAll(result.stdout)
-            .mapNotNull { it.value.toDoubleOrNull() }
-            .map { (it * 1000).toLong() }
-            .sorted()
-            .toList()
-        return pts.ifEmpty { null }
+        return parsePtsLinesMs(result.stdout).ifEmpty { null }
     }
 
     /**
-     * Unlike hw_ffmpeg's -copyts leg, a Transformer clip's own output is
-     * zero-based -- its new file's own timeline, not the source's -- so this
-     * checks the first packet against ~0, not against offsetMs the way
-     * [verifyChunkStartAlignment] checks the hw_ffmpeg leg. A first packet
-     * meaningfully past 0 would mean the clip's front, not just its end,
-     * isn't landing exactly where startsAtVerifiedKeyframe was told it would
-     * -- logged only, never rejected, since the encoder's own B-frame reorder
-     * delay alone has been measured elsewhere in this file at ~83ms with
-     * nothing wrong at all (see [probeFirstFramePtsMs]'s doc comment), and
-     * this checks a different leg with different encoder settings than that
-     * measurement was taken against.
+     * ffprobe's `pts_time` column ("0.033333", "-0.021333,", "N/A") to whole ms, sorted.
      *
-     * Reads packet timestamps ([probeStreamFramePtsMsSorted]) rather than
-     * decoding frames -- the previous frame-level version cost ~4s per chunk
-     * -- and logs the measured value on every chunk, not only on a miss, so
-     * the distribution across a whole run is visible: the evidence needed to
-     * decide whether setStartsAtKeyFrame is doing its job on the start side.
+     * Parsed by hand, in integer arithmetic. The version this replaces ran a
+     * regex over the output and `toDoubleOrNull()` on every match -- tens of
+     * microseconds a value on a phone, so seconds of pure parsing for the
+     * 80,000 frames of one film -- and multiplied the double by 1000, which
+     * is off by a millisecond on some values (32.3 * 1000 is 32299.999999999996).
+     * The first cost nothing at 30 seconds of video and a great deal at 45 minutes.
      */
-    private suspend fun verifySafePathStartAlignment(videoOnlyFile: File, itemName: String): Boolean {
-        val firstPacketMs = probeStreamFramePtsMsSorted(videoOnlyFile, "v:0")?.firstOrNull() ?: return true
-        val ok = firstPacketMs <= SAFE_PATH_START_ALIGNMENT_TOLERANCE_MS
-        Log.d(TAG, "verifySafePathStartAlignment: '$itemName' -- first video packet pts=${firstPacketMs}ms (tolerance ${SAFE_PATH_START_ALIGNMENT_TOLERANCE_MS}ms) ${if (ok) "OK" else "SUSPECT"}")
-        if (!ok) {
-            Log.w(TAG, "verifySafePathStartAlignment: '$itemName' -- clip's first packet lands ${firstPacketMs}ms into its own output, past the encoder-reorder-delay noise floor -- possible dropped or duplicated content at the front of this chunk")
+    private fun parsePtsLinesMs(text: String): List<Long> {
+        val out = ArrayList<Long>(text.length / 9 + 1)
+        val n = text.length
+        var i = 0
+        while (i < n) {
+            var negative = false
+            if (text[i] == '-') { negative = true; i++ }
+            var whole = 0L
+            var digits = 0
+            while (i < n && text[i] in '0'..'9') { whole = whole * 10 + (text[i] - '0'); i++; digits++ }
+            var micros = 0L
+            if (i < n && text[i] == '.') {
+                i++
+                var scale = 100_000L
+                while (i < n && text[i] in '0'..'9') { micros += (text[i] - '0') * scale; scale /= 10; i++ }
+            }
+            if (digits > 0) {
+                val ms = (whole * 1_000_000L + micros) / 1000L
+                out += if (negative) -ms else ms
+            }
+            while (i < n && text[i] != '\n') i++ // the rest of the line: trailing commas, "N/A", CR
+            i++
         }
-        return ok
+        out.sort()
+        return out
     }
 
+
+    /**
+     * The video leg through Media3's Transformer: ONE export of the whole range
+     * into [leg]'s output as a FRAGMENTED mp4 (Media3's fragmented muxer, a
+     * moov up front and a self-contained fragment per couple of seconds), so
+     * what has been encoded is readable while the export is still running --
+     * the same shape the ffmpeg path writes, and the one the merge depends on.
+     * [leg]'s output is an ordinary file when saving and a FIFO when streaming.
+     *
+     * Whole-range Transformer exports are where the silent truncation was seen
+     * (androidx/media#758): an export that completes cleanly having produced a
+     * fraction of the range. A fragmented output cannot hide that -- the leg's
+     * own coverage is checked against what was asked for as it finishes, and a
+     * short leg fails the run rather than being muxed against full-length audio.
+     *
+     * The fragmented writer has one flaw that matters for sync: it cannot know
+     * how long a fragment's last sample lasts, guesses, and -- writing no
+     * decode times -- lets every guess accumulate (about 1 ms per 4 s fragment
+     * on a 30 fps MKV). [sampleTimes] receives what the muxer is handed, and the
+     * leg uses it to re-time itself ([FragmentTimeCorrector]).
+     */
     @OptIn(UnstableApi::class)
-    private suspend fun transcodeViaFullMedia3Path(
+    private suspend fun transcodeVideoLegViaSafePath(
         item: MediaCollection.MediaNode.Item,
         targetCodec: Constants.Transcoder.VideoCodec,
         resolution: Constants.Transcoder.Resolution,
-        outputFile: File,
+        leg: FragmentLeg,
+        sampleTimes: SampleTimes,
         limitDurationMs: Long? = null,
         offsetMs: Long = 0,
         timeoutMs: Long
     ): Boolean {
-        return withContext(Dispatchers.Main) {
-            withTimeoutOrNull(timeoutMs.milliseconds) {
-                // Wraps the suspendCancellableCoroutine below so the progress
-                // monitor can be launched as its structured child instead of on
-                // the long-lived `scope` field -- see the comment on that launch
-                // call for what that buys.
-                coroutineScope {
-                    suspendCancellableCoroutine { continuation ->
-                        val videoMimeType = when (targetCodec) {
-                            Constants.Transcoder.VideoCodec.H264 -> MimeTypes.VIDEO_H264
-                            Constants.Transcoder.VideoCodec.HEVC -> MimeTypes.VIDEO_H265
-                            else -> MimeTypes.VIDEO_H264
-                        }
-
-                        // Assigned once the export actually starts, below.
-                        lateinit var progressJob: Job
-
-                        val transformer = Transformer.Builder(context)
-                            .setVideoMimeType(videoMimeType)
-                            .setAudioMimeType(MimeTypes.AUDIO_AAC)
-                            .setEncoderFactory(DefaultEncoderFactory.Builder(context)
-                                .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder()
-                                    .setBitrate(resolution.targetBitrateKbps * 1000)
-                                    .build())
-                                .build())
-                            // The muxer's own internal stuck-pipeline timeout, separate
-                            // from the withTimeoutOrNull budget above. This file already
-                            // documents MediaCodec hanging on specific hardware, so a
-                            // second, independently-tuned timeout racing the one this
-                            // file controls is more likely to interfere than help.
-                            // TIME_UNSET disables it and relies on the outer budget
-                            // instead.
-                            .setMaxDelayBetweenMuxerSamplesMs(C.TIME_UNSET)
-                            .addListener(object : Transformer.Listener {
-                                override fun onCompleted(composition: Composition, exportResult: ExportResult) { 
-                                    Log.d(TAG, "Full path: Export completed")
-                                    progressJob.cancel()
-                                    if (continuation.isActive) continuation.resume(true) 
-                                }
-                                override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
-                                    progressJob.cancel()
-                                    if (exportException.message?.contains("Release timed out") == true || 
-                                        exportException.cause?.message?.contains("Release timed out") == true) {
-                                        // "Release timed out" can fire spuriously during cleanup after a
-                                        // genuinely successful export -- don't trust the message alone,
-                                        // verify the output actually landed before calling it OK.
-                                        val wroteOutput = outputFile.exists() && outputFile.length() > 0
-                                        Log.w(TAG, "Full path: Release timeout during cleanup, output present=$wroteOutput (size=${outputFile.length()})")
-                                        if (continuation.isActive) continuation.resume(wroteOutput)
-                                        return
-                                    }
-                                    Log.e(TAG, "Full path: Transformer failed: ${exportException.message}", exportException)
-                                    Log.e(TAG, "  > Error Details: ${exportException.cause?.message}")
-                                    if (continuation.isActive) continuation.resume(false)
-                                }
-                            }).build()
-                        try {
-                            val mediaItemBuilder = MediaItem.Builder().setUri(item.uri).setMimeType(item.mimeType)
-                            if (limitDurationMs != null || offsetMs > 0) {
-                                mediaItemBuilder.setClippingConfiguration(MediaItem.ClippingConfiguration.Builder()
-                                    .setStartPositionMs(offsetMs)
-                                    .setEndPositionMs(if (limitDurationMs != null) offsetMs + limitDurationMs else C.TIME_END_OF_SOURCE)
-                                    .build())
-                            }
-                            val mediaItem = mediaItemBuilder.build()
-                            val editedMediaItem = EditedMediaItem.Builder(mediaItem).build()
-                            Log.d(TAG, "Full path: Starting export to ${outputFile.absolutePath}")
-                            transformer.start(editedMediaItem, outputFile.absolutePath)
-
-                            // Progress logging loop -- a structured child of this
-                            // coroutineScope (the same scope the export itself runs
-                            // under) rather than of the long-lived `scope` field. That
-                            // makes two things true that weren't before: the enclosing
-                            // withTimeoutOrNull firing now cancels this immediately via
-                            // ordinary structured-concurrency propagation instead of the
-                            // loop having to notice on its next 2-second tick that
-                            // `continuation` went inactive, and explicitly cancelling it
-                            // in the listener above (rather than waiting for it to notice
-                            // on its own) is what lets this coroutineScope actually
-                            // complete once the export does.
-                            val progressHolder = ProgressHolder()
-                            progressJob = launch(Dispatchers.Main) {
-                                var lastBytes = -1L
-                                var lastGrowthAt = System.currentTimeMillis()
-                                while (isActive) {
-                                    val state = transformer.getProgress(progressHolder)
-                                    val bytes = outputFile.length()
-                                    val now = System.currentTimeMillis()
-                                    if (bytes != lastBytes) { lastGrowthAt = now; lastBytes = bytes }
-                                    val stalledForMs = now - lastGrowthAt
-                                    if (state != Transformer.PROGRESS_STATE_WAITING_FOR_AVAILABILITY) {
-                                        Log.d(TAG, "Full path: Progress: ${progressHolder.progress}% (state=$state, bytesWritten=$bytes, ${diagnosticSnapshot()})")
-                                    }
-                                    if (stalledForMs >= 6000L) {
-                                        Log.w(TAG, "Full path: STALL SUSPECTED -- no byte growth for ${stalledForMs}ms (state=$state, bytesWritten=$bytes, ${diagnosticSnapshot()})")
-                                    }
-                                    delay(2000.milliseconds)
-                                }
-                            }
-                            continuation.invokeOnCancellation {
-                                progressJob.cancel()
-                                CoroutineScope(Dispatchers.Main.immediate + SupervisorJob()).launch { try { transformer.cancel() } catch (e: Exception) {} }
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Full path: Transformer setup failed: ${e.message}", e)
-                            if (continuation.isActive) continuation.resume(false)
-                        }
-                    }
-                }
-            } ?: false
-        }
-    }
-
-    @OptIn(UnstableApi::class)
-    private suspend fun transcodeViaSafePath(
-        item: MediaCollection.MediaNode.Item,
-        targetCodec: Constants.Transcoder.VideoCodec,
-        resolution: Constants.Transcoder.Resolution,
-        audioLeg: AudioLeg?,
-        outputFile: File,
-        limitDurationMs: Long? = null,
-        offsetMs: Long = 0,
-        timeoutMs: Long,
-        fragmented: Boolean = false,
-        durationToleranceMs: Long = CHUNK_DURATION_TOLERANCE_MS,
-        sessionId: String,
-        startsAtVerifiedKeyframe: Boolean = false
-    ): ChunkOutcome {
-        val videoOnlyFile = File(durableWorkDir, "safepath_video_${item.id}_$sessionId.mp4")
-        if (videoOnlyFile.exists()) videoOnlyFile.delete()
-
+        // The leg's own output. Never deleted here: deleting a FIFO would remove the pipe its reader holds.
+        val videoOnlyFile = leg.path
         // The requested resolution used to reach the encoder as a bitrate budget
         // only: a 4K source asked for at 1080p was encoded at full 4K with a
         // 1080p bitrate, i.e. 4x the pixels at a quarter of the bits per pixel.
         // A Presentation effect makes the composition actually scale, which also
         // makes the export cheaper (fewer pixels through the encoder) and so less
-        // likely to hit the per-chunk timeout. Null means the scan's resolution
+        // likely to hit the time budget. Null means the scan's resolution
         // string was unparseable -- in that case encode at source size, as before,
         // rather than guessing at a box.
         //
         // encodeTargetSize, not a local derivation: this has to be the identical
-        // box the ffmpeg path pads to, or a chunk that falls back mid-file changes
-        // size at the seam. Presentation letterboxes by up to one alignment step
+        // box the ffmpeg path pads to, or the two encoders would disagree about the
+        // output size. Presentation letterboxes by up to one alignment step
         // to reach it, which is the same black bar ffmpeg's `pad` adds -- that
         // equivalence is the point.
         val targetSize = encodeTargetSize(item, resolution)
@@ -4155,11 +2738,11 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
 
         if (!encoderAdvertisesSupport(targetCodec, resolution)) {
             // Definitive in milliseconds via MediaCodecInfo/EncoderUtil -- fail
-            // this chunk now rather than spending its whole timeout budget
+            // this leg now rather than spending its whole timeout budget
             // starting a Transformer export the device doesn't even advertise
             // being able to run.
             Log.e(TAG, "Safe path: device does not advertise support for $targetCodec @ ${resolution.name} -- failing '${item.name}' without attempting the export")
-            return ChunkOutcome.Failed
+            return false
         }
 
         // Visible outside the suspendCancellableCoroutine so the finally below can
@@ -4168,6 +2751,14 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         var transformerRef: Transformer? = null
         var exportStarted = false
         var exportSettled = false
+
+        // Pacing applies to file legs only: a piped leg is already held to its
+        // reader's pace by the pipe. See SAFE_PATH_FILE_MAX_SPEED.
+        val throttle = if (!leg.isPipe && SAFE_PATH_FILE_MAX_SPEED > 0.0) ExportThrottle(SAFE_PATH_FILE_MAX_SPEED) else null
+        // Launched on the long-lived scope, not as a child of the export's own
+        // coroutineScope, so a slow /proc read can never hold up its teardown;
+        // cancelled in the finally below.
+        var telemetryJob: Job? = null
 
         val videoResult: Boolean? = withContext(Dispatchers.Main) {
             try {
@@ -4189,6 +2780,15 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
 
                     val transformer = Transformer.Builder(context)
                         .setVideoMimeType(videoMimeType)
+                        // Fragmented output, in place of the default progressive mp4 (whose moov
+                        // only exists once the export has finished, so nothing could be read
+                        // before then, and whose memory use grows with the export). Needs
+                        // Media3 1.6+: InAppFragmentedMp4Muxer replaced InAppMuxer's
+                        // setOutputFragmentedMp4 there. Wrapped so that the timestamp of every
+                        // sample it is handed is kept: its writer lets the video timeline drift
+                        // (see FragmentTimeCorrector), and those timestamps are what put it right.
+                        // The same wrapper paces a file leg's export (see ExportThrottle).
+                        .setMuxerFactory(TimingMuxerFactory(InAppFragmentedMp4Muxer.Factory(SAFE_PATH_FRAGMENT_DURATION_MS), sampleTimes, throttle))
                         .setEncoderFactory(DefaultEncoderFactory.Builder(context)
                             .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder()
                                 .setBitrate(resolution.targetBitrateKbps * 1000)
@@ -4202,12 +2802,12 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                                 .build())
                             .build())
                         // The muxer's own internal stuck-pipeline timeout, separate
-                        // from STALL_ABORT_MS below and the outer withTimeoutOrNull
+                        // from the video leg's stall watchdog and the outer withTimeoutOrNull
                         // budget. Both of those already bound a wedged export on
                         // exactly the hardware (Tensor chips) this file documents
                         // hanging elsewhere; TIME_UNSET disables this third,
                         // independently-tuned timeout and relies on those
-                        // already-verified bounds instead of racing them.
+                        // already-verified bounds instead of racing them -- and when streaming, a viewer who pauses leaves the muxer blocked on a full pipe for as long as the pause lasts, which must not be taken for a stall.
                         .setMaxDelayBetweenMuxerSamplesMs(C.TIME_UNSET)
                         .addListener(object : Transformer.Listener {
                             override fun onCompleted(composition: Composition, exportResult: ExportResult) {
@@ -4228,8 +2828,8 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                                     // "Release timed out" can fire spuriously during cleanup after a
                                     // genuinely successful export -- don't trust the message alone,
                                     // verify the output actually landed before calling it OK.
-                                    val wroteOutput = videoOnlyFile.exists() && videoOnlyFile.length() > 0
-                                    Log.w(TAG, "Safe path: Release timeout during cleanup, output present=$wroteOutput (size=${videoOnlyFile.length()})")
+                                    val wroteOutput = leg.outputBytes() > 0
+                                    Log.w(TAG, "Safe path: Release timeout during cleanup, output present=$wroteOutput (size=${leg.outputBytes()})")
                                     if (continuation.isActive) continuation.resume(wroteOutput)
                                     return
                                 }
@@ -4237,34 +2837,22 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                                 Log.e(TAG, "  > Error Details: ${exportException.cause?.message}")
                                 if (continuation.isActive) continuation.resume(false)
                             }
-                        }).build()
+                        }).also { applyMaxFramesInEncoder(it) }.build()
                     transformerRef = transformer
                     try {
                         val mediaItemBuilder = MediaItem.Builder().setUri(item.uri).setMimeType(item.mimeType)
                         if (limitDurationMs != null || offsetMs > 0) {
                             mediaItemBuilder.setClippingConfiguration(MediaItem.ClippingConfiguration.Builder()
                                 .setStartPositionMs(offsetMs)
-                                // The chunk's real end, with no margin. This used to ask
-                                // for SAFE_PATH_END_OVERSHOOT_MS more and cut it back in a
-                                // pass of its own; what removes an overrun now, and what
-                                // that cannot repair (a clip that ends early), is in
-                                // addAudioAndMux. Open-ended means to the source's end.
+                                // The range's real end; open-ended means to the source's end.
                                 .setEndPositionMs(if (limitDurationMs != null) offsetMs + limitDurationMs else C.TIME_END_OF_SOURCE)
-                                // Without this, Transformer treats offsetMs as an
-                                // arbitrary position: seek to the keyframe before it,
-                                // decode forward, discard frames until the target is
-                                // reached. That discard-near-a-boundary path is exactly
-                                // where Transformer has had a confirmed bug before
-                                // (androidx/media#829, "clipping produces black initial
-                                // frames" -- fixed, but the same class of off-by-a-few-
-                                // frames issue at a clip boundary, not a one-off). Every
-                                // offsetMs this function is ever called with is either 0
-                                // or came from computeChunkBoundaries, which only sets
-                                // startsAtVerifiedKeyframe when offsetMs is a keyframe it
-                                // actually found in the source -- so telling Transformer
-                                // that plainly, when true, skips the discard step (and
-                                // whatever bugs live in it) instead of trusting it.
-                                .setStartsAtKeyFrame(startsAtVerifiedKeyframe)
+                                // Only an offset of zero is known to sit on a keyframe (the start of
+                                // the file). Any other start -- a streaming seek -- is an arbitrary
+                                // position: Transformer decodes from the keyframe before it and
+                                // discards up to the target, which is where it has had boundary bugs
+                                // before (androidx/media#829). With no chunk boundary left to verify
+                                // a keyframe against, say so only where it is certainly true.
+                                .setStartsAtKeyFrame(offsetMs == 0L)
                                 .build())
                         }
                         val mediaItem = mediaItemBuilder.build()
@@ -4277,9 +2865,8 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                             // alignment exactly. That's intentional, not a leftover
                             // distortion: it's the identical bar videoScaleFilter's
                             // `pad` adds on the ffmpeg path for the same box, which is
-                            // the whole point of sharing encodeTargetSize -- a chunk
-                            // that falls back mid-file lands on the same pixel
-                            // dimensions either way.
+                            // the whole point of sharing encodeTargetSize -- either
+                            // encoder lands on the same pixel dimensions.
                             val presentation = Presentation.createForWidthAndHeight(
                                 targetSize.width, targetSize.height, Presentation.LAYOUT_SCALE_TO_FIT
                             )
@@ -4289,8 +2876,10 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                         }
                         val editedMediaItem = editedMediaItemBuilder.build()
                         Log.d(TAG, "Safe path: Starting video-only export for '${item.name}' to ${videoOnlyFile.absolutePath} (source=${item.resolution}, target=${targetSize ?: "source size"}, tier=${resolution.name} ${tierBox(resolution)}, budget=${timeoutMs}ms, ${diagnosticSnapshot()})")
+                        Log.d(TAG, "Safe path: export pacing for '${item.name}': ${if (throttle != null) "capped at ${throttle.maxSpeed}x realtime" else "unthrottled (${if (leg.isPipe) "piped leg" else "cap disabled"})"}")
                         transformer.start(editedMediaItem, videoOnlyFile.absolutePath)
                         exportStarted = true
+                        telemetryJob = launchExportTelemetry(item.name, leg, throttle)
 
                         // Progress logging loop -- a structured child of this
                         // coroutineScope (the same scope the export runs under)
@@ -4306,9 +2895,10 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                         progressJob = launch(Dispatchers.Main) {
                             var lastBytes = -1L
                             var lastGrowthAt = System.currentTimeMillis()
+                            var stacksDumped = false
                             while (isActive) {
                                 val state = transformer.getProgress(progressHolder)
-                                val bytes = videoOnlyFile.length()
+                                val bytes = leg.outputBytes()
                                 val now = System.currentTimeMillis()
                                 if (bytes != lastBytes) { lastGrowthAt = now; lastBytes = bytes }
                                 val stalledForMs = now - lastGrowthAt
@@ -4324,21 +2914,18 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                                     // a question, and they take it off Main.
                                     Log.d(TAG, "Safe path: Video progress: ${progressHolder.progress}% (state=$state, bytesWritten=$bytes)")
                                 }
-                                if (stalledForMs >= 6000L) {
+                                if (stalledForMs >= 6000L && !(leg.isPipe && leg.queuedMs() >= STREAM_LEAD_MS)) { // a full pipe is a pause on purpose, not a stall
                                     val snapshot = withContext(Dispatchers.IO) { diagnosticSnapshot() }
                                     Log.w(TAG, "Safe path: STALL SUSPECTED for '${item.name}' -- no byte growth for ${stalledForMs}ms (state=$state, bytesWritten=$bytes, $snapshot)")
                                 }
-                                // The counterweight to Budget's generous budgets: a
-                                // wedged export now fails in ~30s instead of sitting
-                                // out a multi-minute budget, while a device that is
-                                // merely slow still gets the whole budget. This used
-                                // to warn and keep waiting.
-                                if (stalledForMs >= STALL_ABORT_MS) {
-                                    val snapshot = withContext(Dispatchers.IO) { diagnosticSnapshot() }
-                                    Log.e(TAG, "Safe path: aborting '${item.name}' -- no byte growth for ${stalledForMs}ms (state=$state, bytesWritten=$bytes, $snapshot)")
-                                    if (continuation.isActive) continuation.resume(false)
-                                    return@launch
+                                if (stalledForMs >= STALL_DUMP_AFTER_MS && !stacksDumped && !(leg.isPipe && leg.queuedMs() >= STREAM_LEAD_MS)) {
+                                    stacksDumped = true
+                                    withContext(Dispatchers.IO) { logMediaThreadStacks("'${item.name}': no byte growth for ${stalledForMs}ms, state=$state") }
                                 }
+                                // No abort here. A wedged export is stopped by launchLeg's own
+                                // watchdog (VIDEO_LEG_STALL_ABORT_MS), which also knows that a leg
+                                // held back by a full pipe is waiting on purpose; this loop, which
+                                // only sees bytes, would take that for a stall.
                                 delay(2000.milliseconds)
                             }
                         }
@@ -4351,6 +2938,8 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                 }
             }
             } finally {
+                // cancel(), not cancelAndJoin(): nothing waits on the monitor.
+                telemetryJob?.cancel()
                 // Every exit from here -- success, error, timeout, outer
                 // cancellation -- goes through this. NonCancellable because on the
                 // cancellation path a suspending cleanup would otherwise be
@@ -4366,49 +2955,20 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                 }
             }
         }
+        if (throttle != null) Log.d(TAG, "Safe path: pacing summary for '${item.name}': ${throttle.summary()}")
         if (videoResult == null) {
             Log.e(TAG, "Safe path: video leg for '${item.name}' exceeded its ${timeoutMs}ms budget (${diagnosticSnapshot()})")
-            videoOnlyFile.delete()
-            return ChunkOutcome.TimedOut
+            return false
         }
-        if (!videoResult || !videoOnlyFile.exists() || videoOnlyFile.length() == 0L) {
+        if (!videoResult || leg.outputBytes() == 0L) {
             Log.e(TAG, "Safe path: video leg failed for '${item.name}' (${diagnosticSnapshot()})")
-            videoOnlyFile.delete()
-            return ChunkOutcome.Failed
+            return false
         }
         // A video leg that produced output proves the codec pool is not exhausted.
         consecutiveCodecAllocationFailures.set(0)
-
-        // Diagnostic only -- see its own doc comment on why this logs rather
-        // than rejects. The leg may still run slightly past its window here;
-        // addAudioAndMux cuts it back as it muxes.
-        verifySafePathStartAlignment(videoOnlyFile, item.name)
-
-        val expectedDurationMs = limitDurationMs ?: (resolveSourceDurationMs(item) - offsetMs)
-        // One probe of the video-only leg, shared by the two checks below. They
-        // read different fields of the same container and nothing writes to the
-        // file between them, so the second spawn was pure duplication.
-        val videoLegProbe = probeMedia(videoOnlyFile)
-        if (!verifyChunkDuration(videoOnlyFile, expectedDurationMs, item.name, durationToleranceMs, probe = videoLegProbe)) {
-            Log.e(TAG, "Safe path: video leg for '${item.name}' completed without error but produced truncated output -- treating as failure (known Media3 Transformer long-export issue, androidx/media#758)")
-            videoOnlyFile.delete()
-            return ChunkOutcome.Failed
-        }
-
-        // Verification here has only ever covered duration, which is why the
-        // ignored resolution request went unnoticed for so long. Now that a scale
-        // is actually requested, confirm it was honored.
-        if (targetSize != null && !verifyOutputResolution(videoOnlyFile, targetSize, item.name, probe = videoLegProbe)) {
-            Log.e(TAG, "Safe path: video leg for '${item.name}' ignored the requested output size -- treating as failure rather than shipping a chunk at the wrong resolution")
-            videoOnlyFile.delete()
-            return ChunkOutcome.Failed
-        }
-
-        return addAudioAndMux(
-            item, videoOnlyFile, outputFile, audioLeg, offsetMs = offsetMs, limitDurationMs = limitDurationMs,
-            frameRate = videoLegProbe?.frameRate, fragmented = fragmented
-        )
+        return true
     }
+
 
     /** Fallback for [itemHasAudio] when the library scan recorded no audio
      *  metadata at all. Cached per item: this is the call that cost a full
@@ -4459,30 +3019,13 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
 
     /** Whether a failure message looks like the device's codec pool being gone
      *  rather than anything about this particular file. Retrying these cannot
-     *  succeed, so [transcodeInChunks] stops instead of spending its retry
-     *  budget proving it. */
+     *  succeed, so they are counted and named in the log rather than left to
+     *  look like anything about this particular file. */
     private fun looksLikeCodecExhaustion(text: String?): Boolean {
         if (text == null) return false
         return text.contains("Failed to allocate", ignoreCase = true) ||
             text.contains("CodecException", ignoreCase = true) ||
             text.contains("0x80001001", ignoreCase = true)
-    }
-
-    /**
-     * Why a chunk attempt ended. Only the one bit [ProcessOutput] and
-     * `withTimeoutOrNull` already know, propagated instead of discarded: a
-     * `Boolean` return made "the encoder timed out" and "this file can't be
-     * encoded" indistinguishable, so the retry loop reran a timeout against an
-     * identical budget and failed identically.
-     *
-     * Deliberately not the full sealed failure hierarchy -- that touches every
-     * function in the transcode path, and line-number stability against logcat
-     * has real value while the hang investigation is open.
-     */
-    private sealed interface ChunkOutcome {
-        data object Success : ChunkOutcome
-        data object TimedOut : ChunkOutcome
-        data object Failed : ChunkOutcome
     }
 
     private enum class TransformerOutcome { PASS, FAIL, HANG }
@@ -4541,7 +3084,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * progressive mp4 has its index at the end, so nothing can read it until
      * the last packet is out; a fragmented one is a sequence of
      * self-describing pieces, each readable once it is complete. See
-     * [AudioLeg] for how the pieces are consumed.
+     * [FragmentLeg] for how the pieces are consumed.
      *
      * `delay_moov` rather than `empty_moov`, and it matters: `empty_moov`
      * writes the moov before any packet exists, and with no packet to look at
@@ -4549,7 +3092,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * nothing and the priming packet is left sitting at time 0 where it is
      * indistinguishable from audio. `delay_moov` holds the moov until the
      * first fragment is cut, which is what lets the muxer declare that delay
-     * in an edit list -- and [readAudioLayout] reads it from there, so
+     * in an edit list -- and [parseLegHeader] reads it from there, so
      * nothing downstream has to know how long any particular encoder's
      * priming is.
      *
@@ -4572,14 +3115,16 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         encoder: String = "aac",
         audioBitrateBps: Int = 128_000,
         audioTrackIndex: Int = 0,
-        timeoutMs: Long = 300_000L
+        timeoutMs: Long = 300_000L,
+        /** Bytes of output so far, for a leg that is piped (nothing on disk to measure); null means [outFile] is a file. */
+        written: (() -> Long)? = null
     ): Boolean {
         val input = resolveFfmpegInputPath(item)
         // No -hwaccel/-ndk_codec here: those are video decode acceleration hints
         // and this call has no video output (-vn, only an audio stream mapped).
         // They were previously copied over from the video encode args, and on
         // this hardware mediacodec hwaccel is known to hang (see
-        // transcodeViaHardwareFfmpeg's callers/useHardwareFfmpegPipeline) --
+        // useHardwareFfmpegPipeline) --
         // a very plausible explanation for a whole-range audio encode taking
         // minutes when it should take seconds.
         val args = mutableListOf(ffmpegPath, "-y", "-hide_banner")
@@ -4597,101 +3142,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         // -- a 3-minute clip and a 3-hour film shared one budget. The caller
         // derives it from the work (Budget.forAudio of the whole range).
         val result = runProcessCapture(args, timeoutMs = timeoutMs, stdinSource = input.stdinSource)
-        return result.succeededWriting(outFile)
-    }
-
-    /**
-     * Muxes [videoFile] and, when there is one, the [audio] window into
-     * [outFile] via stream copy. The audio map is mandatory (no trailing
-     * `?`) -- callers only reach this with a window once they know audio
-     * exists, so a failed map means something is genuinely wrong with the
-     * audio and should fail the chunk instead of silently shipping a
-     * video-only file reported as a success.
-     *
-     * Everything about the audio slice is an *input* option on the audio
-     * input: `-ss`/`-t` (see [planAudioWindow]) select its packets, and
-     * `-copypriorss 0` makes the cut strict -- the demuxer seeks to a packet
-     * at or before the start, and without it that earlier packet would be
-     * copied as well. The first packet kept lands at ~0 in this file, which
-     * is why placing it in the finished timeline falls to
-     * [patchFragmentTimestamps].
-     *
-     * The slice that opens the range is the exception, when the priming is
-     * kept ([AudioWindow.keepsPriming]): it begins with the encoder's
-     * priming packet, at negative presentation time. It gets no strict cut
-     * (that would discard the packet), no make_zero (that would slide
-     * everything, video included, 21ms later to bring it to zero) and, if
-     * the output is fragmented, delay_moov rather than empty_moov (without
-     * it the muxer cannot write the edit list that tells a player to skip
-     * the packet). The result is an audio track whose edit list starts one
-     * packet in, and a video track that has not moved.
-     *
-     * [videoLimitSeconds] is the input-side `-t` on the video: how an
-     * overrunning leg is cut back to its window (see [addAudioAndMux]).
-     *
-     * Deliberately no `-copyts` anywhere in this command: each input is
-     * normalised to start at zero independently, which is what lets a video
-     * leg that carries absolute source timestamps (hw_ffmpeg in file mode)
-     * and an audio slice that starts at zero come out aligned. `-copyts`
-     * here silently reintroduces a compounding drift -- confirmed at ~394ms
-     * over 9 chunks -- by defeating exactly that.
-     */
-    private suspend fun remuxVideoAndAudio(
-        videoFile: File,
-        audio: AudioWindow?,
-        outFile: File,
-        fragmented: Boolean = false,
-        videoLimitSeconds: Double? = null
-    ): Boolean {
-        Log.d(TAG, "Remuxing: V=${videoFile.absolutePath} (${videoFile.length()} bytes), A=${audio?.let { "${it.file.name} ss=${it.seekSeconds} t=${it.durationSeconds}" } ?: "none"} -> ${outFile.absolutePath}, fragmented=$fragmented, videoLimit=${videoLimitSeconds}s")
-        // (13) max_muxing_queue_size is the standard mitigation for ffmpeg's "Too
-        // many packets buffered for output stream", which shows up when the two
-        // inputs have a large initial PTS gap -- a real possibility here since
-        // video and audio are produced independently, not demuxed from one
-        // source with a shared timeline. avoid_negative_ts and genpts are cheap
-        // insurance alongside it.
-        val args = mutableListOf(ffmpegPath, "-y", "-hide_banner", "-fflags", "+genpts")
-        videoLimitSeconds?.let { args.addAll(listOf("-t", formatSeconds(it))) }
-        args.addAll(listOf("-i", videoFile.absolutePath))
-        if (audio != null) {
-            audio.seekSeconds?.let { args.addAll(listOf("-ss", formatSeconds(it))) }
-            audio.durationSeconds?.let { args.addAll(listOf("-t", formatSeconds(it))) }
-            args.addAll(listOf("-i", audio.file.absolutePath))
-        }
-        args.addAll(listOf("-map", "0:v:0"))
-        if (audio != null) args.addAll(listOf("-map", "1:a:0"))
-        val keepsPriming = audio?.keepsPriming == true
-        args.addAll(listOf("-c", "copy"))
-        // The cut at the slice's start is strict -- except for the slice that
-        // deliberately opens with the priming packet, which sits before time
-        // zero, exactly what a strict cut discards.
-        if (!keepsPriming) args.addAll(listOf("-copypriorss", "0"))
-        // Likewise make_zero, which slides every stream later until the
-        // earliest timestamp is zero. With the priming packet at -21ms that
-        // would drag the whole chunk, video included, 21ms late and strip the
-        // declaration that makes a player skip it -- the shift this exists to
-        // avoid. "disabled" leaves it at negative time, where the muxer turns
-        // it into an edit list on the audio track.
-        args.addAll(listOf("-avoid_negative_ts", if (keepsPriming) "disabled" else "make_zero", "-max_muxing_queue_size", "1024"))
-        if (fragmented) {
-            // empty_moov writes the moov before any packet exists, and then cannot
-            // declare that the audio starts early ("No meaningful edit list will be
-            // written when using empty_moov without delay_moov"); delay_moov holds
-            // the moov until the first fragment is cut, which is what lets it.
-            val moov = if (keepsPriming) "delay_moov" else "empty_moov"
-            args.addAll(listOf("-movflags", "frag_keyframe+$moov+default_base_moof"))
-        }
-        args.addAll(listOf("-f", "mp4", outFile.absolutePath))
-        // Stream-copy work, budgeted by bytes rather than a flat 60s -- a remux
-        // of a multi-gigabyte 4K leg and one of a small 480p leg were held to the
-        // same number before. The audio's own file is not counted: it is the
-        // whole range's, of which this reads one window.
-        val timeoutMs = Budget.forStreamCopy(videoFile.length())
-        val result = runProcessCapture(args, timeoutMs = timeoutMs)
-        val success = result.succeededWriting(outFile)
-        Log.d(TAG, "Remuxing finished: success=$success, exitCode=${result.exitCode}, budget=${timeoutMs}ms, targetSize=${outFile.length()}, ${diagnosticSnapshot()}")
-        if (!success) Log.e(TAG, "Remuxing failed, stderr: ${result.stderr}")
-        return success
+        return if (written != null) result.exitCode == 0 && written() > 0L else result.succeededWriting(outFile)
     }
 
     private fun currentAppVersionCode(): Long = try { val info = context.packageManager.getPackageInfo(context.packageName, 0); info.longVersionCode } catch (e: PackageManager.NameNotFoundException) { -1L }
@@ -4701,6 +3152,276 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      *  both missing the TTL cost one redundant snapshot, not a correctness
      *  problem. */
     @Volatile private var cachedSnapshot: Pair<Long, String>? = null
+
+    /**
+     * Where each thread of a Transformer export is, logged at the moment the
+     * export has stopped growing -- so the next stall's log says what the
+     * pipeline is BLOCKED ON (the GL thread in a buffer swap, the muxer in a
+     * write, a codec in a dequeue ...) instead of only that it is blocked.
+     *
+     * Only Java threads show here, but a Java thread parked inside a native
+     * call shows the Java frame that made it, which is the part that names the
+     * stage. One log line per thread: a logcat entry is cut off at about 4 KB.
+     */
+    private fun logMediaThreadStacks(reason: String) {
+        try {
+            val interesting = Regex("Effect|Transformer|ExoPlayer|Codec|Muxer|Loader|GlThread|VideoFrame", RegexOption.IGNORE_CASE)
+            val all = Thread.getAllStackTraces()
+            val matching = all.entries.filter { interesting.containsMatchIn(it.key.name) }
+            Log.w(TAG, "Safe path: thread dump ($reason) -- ${matching.size} of ${all.size} threads look like the export's")
+            for ((thread, frames) in matching.sortedBy { it.key.name }) {
+                val sb = StringBuilder("Safe path: thread [${thread.name}] ${thread.state}")
+                for (f in frames.take(18)) sb.append("\n        at ").append(f)
+                Log.w(TAG, sb.toString())
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Safe path: thread dump failed: ${e.message}")
+        }
+    }
+
+    /**
+     * One line every [EXPORT_TELEMETRY_INTERVAL_MS], for as long as a Safe Path
+     * export runs: the time series a stall is read against. [diagnosticSnapshot]
+     * says what the system looked like at one moment; this says what was moving
+     * beforehand -- whether output speed decays gradually (a resource running
+     * out) or drops off a cliff (a wedge), and which of free memory, graphics
+     * memory, file descriptors, threads or temperature moved with it.
+     *
+     * Launched on [scope] rather than as a child of the export, and cancelled
+     * by it without waiting: reading /proc and Debug.MemoryInfo can take a long
+     * time exactly when the system is thrashing, and a monitor must not be able
+     * to hold up the export's teardown. Everything it touches is read-only.
+     */
+    private fun launchExportTelemetry(itemName: String, leg: FragmentLeg, throttle: ExportThrottle?): Job = scope.launch {
+        val startNanos = System.nanoTime()
+        var lastBytes = leg.outputBytes()
+        var lastNanos = startNanos
+        // (elapsed ms, media ms) over the last ~10 s. A fragment lands every few
+        // seconds of media, so the speed across a single 2 s tick is too coarse
+        // to read.
+        val recent = ArrayDeque<LongArray>()
+        var tick = 0
+        while (isActive) {
+            val nowNanos = System.nanoTime()
+            val elapsedMs = (nowNanos - startNanos) / 1_000_000
+            val bytes = leg.outputBytes()
+            val mediaMs = leg.coveredEndMs()
+            val sinceLastS = (nowNanos - lastNanos) / 1e9
+            val rateMBps = if (sinceLastS > 0.0) (bytes - lastBytes) / 1_048_576.0 / sinceLastS else 0.0
+            lastBytes = bytes
+            lastNanos = nowNanos
+            recent.addLast(longArrayOf(elapsedMs, mediaMs))
+            while (recent.size > 1 && elapsedMs - recent.first()[0] > 10_000L) recent.removeFirst()
+            val windowMs = elapsedMs - recent.first()[0]
+            val speedRecent = if (windowMs >= 4_000L) speedText((mediaMs - recent.first()[1]).toDouble() / windowMs) else "n/a"
+            val speedAvg = if (elapsedMs > 0L) speedText(mediaMs.toDouble() / elapsedMs) else "n/a"
+            val pacing = if (throttle != null) "cap=${throttle.maxSpeed}x slept=${throttle.sleptMs / 1000}s" else "cap=off"
+            val detail = try { buildTelemetryDetail(deep = tick++ % EXPORT_TELEMETRY_DEEP_EVERY == 0) } catch (e: Exception) { "detail failed: ${e.message}" }
+            Log.d(TAG, "Safe path: telemetry '$itemName' +${elapsedMs / 1000}s | media=${mediaMs}ms out=${bytes / 1_048_576}MB " +
+                "rate=${"%.2f".format(Locale.US, rateMBps)}MB/s speed=$speedRecent(10s) avg=$speedAvg $pacing | $detail")
+            delay(EXPORT_TELEMETRY_INTERVAL_MS)
+        }
+    }
+
+    /** The slow half of a telemetry line, run off the main thread: system memory,
+     *  this process's memory, and temperature. Units are MB unless marked. Every
+     *  field shows "?" when a build won't hand it to an app.
+     *
+     *  Reading it: `avail`/`amAvail` falling toward `thr` is memory pressure;
+     *  `graphics` or `fds` climbing steadily is a leak in the buffer pipeline
+     *  (every GraphicBuffer holds a descriptor); `swapUsed` climbing is the
+     *  system compressing other apps to make room; `headroom` is 1.0 at the
+     *  device's SEVERE throttling threshold; `Cma*`/`Dma*`/`Gpu*` appear only
+     *  where the kernel reports them. `CmaFree` near 0 is not itself alarming
+     *  (idle contiguous memory is lent out to ordinary allocations) but it is
+     *  what a codec has to reclaim from when it needs a contiguous block.
+     *
+     *  The `fds` section says what the process's descriptors are; with [deep]
+     *  it also totals the memory held by the dma-bufs among them, which is
+     *  where memory that /proc/meminfo does not account for goes. */
+    private fun buildTelemetryDetail(deep: Boolean): String {
+        fun mb(kb: Long?): String = if (kb == null) "?" else (kb / 1024).toString()
+
+        val mem = readProcKv("/proc/meminfo")
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val amInfo = ActivityManager.MemoryInfo().also { activityManager?.getMemoryInfo(it) }
+        val swapUsedKb = mem["SwapTotal"]?.let { total -> mem["SwapFree"]?.let { free -> total - free } }
+        val pools = mem.entries
+            .filter { entry -> listOf("Cma", "Dma", "Gpu", "Ion").any { entry.key.startsWith(it) } }
+            .sortedBy { it.key }
+            .joinToString(" ") { "${it.key}=${mb(it.value)}" }
+        val system = "sys free=${mb(mem["MemFree"])} avail=${mb(mem["MemAvailable"])} " +
+            "amAvail=${amInfo.availMem / 1_048_576} (thr=${amInfo.threshold / 1_048_576} low=${amInfo.lowMemory}) " +
+            "cached=${mb(mem["Cached"])} dirty=${mem["Dirty"] ?: "?"}kB writeback=${mem["Writeback"] ?: "?"}kB " +
+            "anon=${mb(mem["AnonPages"])} shmem=${mb(mem["Shmem"])} sunreclaim=${mb(mem["SUnreclaim"])} " +
+            "swapUsed=${mb(swapUsedKb)}" + (if (pools.isNotEmpty()) " $pools" else "")
+
+        val debugInfo = Debug.MemoryInfo().also { Debug.getMemoryInfo(it) }
+        val stats = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) debugInfo.memoryStats else emptyMap<String, String>()
+        fun stat(name: String): String = mb(stats["summary.$name"]?.toLongOrNull())
+        val status = readProcKv("/proc/self/status")
+        val runtime = Runtime.getRuntime()
+        val process = "proc pss=${mb(debugInfo.totalPss.toLong())} graphics=${stat("graphics")} native=${stat("native-heap")} " +
+            "(allocated ${Debug.getNativeHeapAllocatedSize() / 1_048_576}) java=${stat("java-heap")} " +
+            "(used ${(runtime.totalMemory() - runtime.freeMemory()) / 1_048_576}) code=${stat("code")} other=${stat("private-other")} " +
+            "rssAnon=${mb(status["RssAnon"])} rssFile=${mb(status["RssFile"])} rssShmem=${mb(status["RssShmem"])} vmSwap=${mb(status["VmSwap"])} " +
+            "threads=${status["Threads"] ?: "?"}"
+        val descriptors = describeOpenFds(deep)
+
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val thermalStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) thermalStatusName(powerManager?.currentThermalStatus) else "n/a"
+        val headroom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) powerManager?.getThermalHeadroom(0) else null
+        val battTenthsC = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            ?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+            ?.takeIf { it != Int.MIN_VALUE }
+        val thermal = "thermal=$thermalStatus headroom=${if (headroom == null || headroom.isNaN()) "n/a" else "%.2f".format(Locale.US, headroom)} " +
+            "batt=${if (battTenthsC == null) "?" else "%.1f".format(Locale.US, battTenthsC / 10.0)}C"
+
+        return "$system | $process | $descriptors | $thermal"
+    }
+
+    /** `Key:   value [kB]` lines of /proc/meminfo or /proc/self/status, as numbers;
+     *  lines whose value is not a plain number are skipped. */
+    private fun readProcKv(path: String): Map<String, Long> {
+        val out = HashMap<String, Long>()
+        try {
+            File(path).forEachLine { line ->
+                val colon = line.indexOf(':')
+                if (colon > 0) {
+                    val number = line.substring(colon + 1).trim().substringBefore(' ').toLongOrNull()
+                    if (number != null) out[line.substring(0, colon)] = number
+                }
+            }
+        } catch (_: Exception) {
+            // Unreadable on this build: the fields that came from it show "?".
+        }
+        return out
+    }
+
+    /**
+     * What this process's file descriptors are, by kind -- and, when [deep],
+     * how much memory the dma-bufs among them hold. The 2026-10-12 telemetry
+     * showed ~4,000 descriptors appearing within six seconds of an export
+     * starting and staying there; the count alone cannot say what they are.
+     *
+     * `fdMax` and `limit` (soft/hard RLIMIT_NOFILE) show whether the count is
+     * running into a ceiling: ~4,000 is suspiciously close to 4,096.
+     */
+    private fun describeOpenFds(deep: Boolean): String {
+        val names = File("/proc/self/fd").list() ?: return "fds=?"
+        val kinds = HashMap<String, Int>()
+        val dmabufFds = ArrayList<String>()
+        var highest = -1
+        for (name in names) {
+            val index = name.toIntOrNull() ?: continue
+            if (index > highest) highest = index
+            // Closed since the listing (the listing's own descriptor, say), or unreadable.
+            val target = try { Os.readlink("/proc/self/fd/$name") } catch (_: Exception) { continue }
+            val kind = fdKind(target)
+            kinds[kind] = (kinds[kind] ?: 0) + 1
+            if (deep && kind == "dmabuf") dmabufFds.add(name)
+        }
+        val summary = kinds.entries.sortedByDescending { it.value }.take(7).joinToString(" ") { "${it.key}:${it.value}" }
+        val out = StringBuilder("fds=${names.size} [$summary] fdMax=$highest limit=${openFileLimit()}")
+        if (deep && dmabufFds.isNotEmpty()) out.append(' ').append(dmabufTotals(dmabufFds))
+        return out.toString()
+    }
+
+    /** The kind of descriptor a /proc/self/fd link target names. */
+    private fun fdKind(target: String): String = when {
+        target.startsWith("anon_inode:dmabuf") || target.startsWith("/dmabuf") -> "dmabuf"
+        target.startsWith("anon_inode:") -> target.substringAfter(':').take(16)   // sync_file, [eventpoll], [eventfd] ...
+        target.startsWith("socket:") -> "socket"
+        target.startsWith("pipe:") -> "pipe"
+        target.startsWith("/memfd:") -> "memfd"
+        target.startsWith("/dev/") -> target.take(24)                              // /dev/binder, /dev/ashmem, a GPU node ...
+        target.startsWith("/data/") || target.startsWith("/storage/") || target.startsWith("/mnt/") -> "file"
+        else -> target.take(24)
+    }
+
+    /** Soft/hard limit on open descriptors, from /proc/self/limits. */
+    private fun openFileLimit(): String = try {
+        File("/proc/self/limits").useLines { lines ->
+            lines.firstOrNull { it.startsWith("Max open files") }
+                ?.removePrefix("Max open files")
+                ?.trim()
+                ?.split(Regex("\\s+"))
+                ?.let { "${it.getOrNull(0)}/${it.getOrNull(1)}" }
+                ?: "?"
+        }
+    } catch (_: Exception) {
+        "?"
+    }
+
+    /**
+     * Distinct dma-bufs among [fdNames], and their total size, from fdinfo --
+     * one file read per descriptor, which is why it is not done on every
+     * sample. Several descriptors can point at one buffer, so they are
+     * matched by inode: `distinct` is the number of buffers, `total` what they
+     * hold, `by` the same split by exporting heap.
+     */
+    private fun dmabufTotals(fdNames: List<String>, fdinfoDir: String = "/proc/self/fdinfo"): String {
+        val seen = HashSet<Long>()
+        val byHeap = HashMap<String, Long>()
+        var totalBytes = 0L
+        var unreadable = 0
+        for (name in fdNames) {
+            var inode = -1L
+            var size = -1L
+            var heap = "?"
+            try {
+                File("$fdinfoDir/$name").forEachLine { line ->
+                    when {
+                        line.startsWith("ino:") -> inode = line.substringAfter(':').trim().toLongOrNull() ?: -1L
+                        line.startsWith("size:") -> size = line.substringAfter(':').trim().toLongOrNull() ?: -1L
+                        line.startsWith("exp_name:") -> heap = line.substringAfter(':').trim()
+                    }
+                }
+            } catch (_: Exception) {
+                unreadable++
+                continue
+            }
+            if (size < 0) { unreadable++; continue }
+            if (inode < 0 || seen.add(inode)) {
+                totalBytes += size
+                byHeap[heap] = (byHeap[heap] ?: 0L) + size
+            }
+        }
+        val split = byHeap.entries.sortedByDescending { it.value }.take(5).joinToString(" ") { "${it.key}=${it.value / 1_048_576}MB" }
+        val distinct = if (seen.isEmpty()) "?" else seen.size.toString()
+        return "dmabuf distinct=$distinct total=${totalBytes / 1_048_576}MB by[$split] unreadable=$unreadable"
+    }
+
+    /** Bounds the frames Transformer lets into the video encoder -- see
+     *  [SAFE_PATH_MAX_FRAMES_IN_ENCODER]. Reflection, because the setter is
+     *  experimental and the log has to say whether this Media3 has it. (A
+     *  minified build would need a keep rule for it.) */
+    @OptIn(UnstableApi::class)
+    private fun applyMaxFramesInEncoder(builder: Transformer.Builder) {
+        val limit = SAFE_PATH_MAX_FRAMES_IN_ENCODER
+        try {
+            builder.javaClass.getMethod("experimentalSetMaxFramesInEncoder", Int::class.javaPrimitiveType).invoke(builder, limit)
+            Log.d(TAG, "Safe path: frames in the encoder limited to $limit (experimentalSetMaxFramesInEncoder)")
+        } catch (_: NoSuchMethodException) {
+            Log.w(TAG, "Safe path: this Media3 has no Transformer.Builder.experimentalSetMaxFramesInEncoder -- frames in the encoder are NOT bounded")
+        } catch (e: Exception) {
+            Log.w(TAG, "Safe path: could not set the frames-in-encoder limit: ${e.message}")
+        }
+    }
+
+    private fun thermalStatusName(status: Int?): String = when (status) {
+        PowerManager.THERMAL_STATUS_NONE -> "NONE"
+        PowerManager.THERMAL_STATUS_LIGHT -> "LIGHT"
+        PowerManager.THERMAL_STATUS_MODERATE -> "MODERATE"
+        PowerManager.THERMAL_STATUS_SEVERE -> "SEVERE"
+        PowerManager.THERMAL_STATUS_CRITICAL -> "CRITICAL"
+        PowerManager.THERMAL_STATUS_EMERGENCY -> "EMERGENCY"
+        PowerManager.THERMAL_STATUS_SHUTDOWN -> "SHUTDOWN"
+        else -> "unknown"
+    }
+
+    private fun speedText(mediaSecondsPerSecond: Double): String = "%.1fx".format(Locale.US, mediaSecondsPerSecond)
+
 
     /** Cheap point-in-time system health snapshot. Thermal throttling and memory
      *  pressure are the obvious suspects for a stall that hits ~50% of runs with
@@ -4909,7 +3630,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * bug for genuinely HDR content. Whether HDR sources should instead be
      * tone-mapped down to SDR for renderers that can't display HDR, or
      * preserved end-to-end for the ones that can, is a product decision, not
-     * an engineering one -- deliberately not made here. transcodeViaSafePath's
+     * an engineering one -- deliberately not made here. transcodeVideoLegViaSafePath's
      * Media3 leg and SurfaceAssetLoaderBridge (which hardcodes
      * ColorInfo.SDR_BT709_LIMITED) still don't carry this through either;
      * making all three consistent depends on that decision being made first.
@@ -4971,9 +3692,8 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * was indistinguishable from an honored one: verification only ever looked
      * at duration.
      *
-     * Deliberately hard to trip, because a rejection here costs a chunk retry
-     * and then the entire transcode (see transcodeInChunks' retry-then-abort
-     * loop). Three allowances:
+     * Deliberately hard to trip, because a rejection here fails the entire
+     * transcode (see transcodeSinglePass). Three allowances:
      *  - [ENCODER_ALIGNMENT_SLACK_PX] of overshoot per axis, since encoders
      *    align dimensions up and Media3's encoder fallback may substitute a
      *    nearby supported resolution;
@@ -5015,69 +3735,12 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
     }
 
     /**
-     * Confirms [file] actually covers [expectedMs] of content before it's
-     * trusted. This exists specifically because of the memory-investigation
-     * finding: Media3 Transformer's video-only export can complete cleanly
-     * (onCompleted, no exception) while having silently produced only a
-     * fraction of the requested duration -- see androidx/media#758. Without
-     * this check that truncated leg gets muxed against a full-length audio
-     * track and shipped as SUCCESS.
-     *
-     * Overrun is checked too, but against a wider bar
-     * ([CHUNK_OVERRUN_TOLERANCE_MS] against [CHUNK_DURATION_TOLERANCE_MS]).
-     * The asymmetry is intentional and documented on those constants: an
-     * over-long chunk is a real failure mode, and a false rejection is the
-     * expensive one. Don't collapse the two into a single symmetric tolerance.
-     */
-    private suspend fun verifyChunkDuration(
-        file: File,
-        expectedMs: Long,
-        itemName: String,
-        toleranceMs: Long = CHUNK_DURATION_TOLERANCE_MS,
-        overrunToleranceMs: Long = CHUNK_OVERRUN_TOLERANCE_MS,
-        probe: MediaProbe? = null
-    ): Boolean {
-        if (!file.exists() || file.length() == 0L) {
-            Log.e(TAG, "verifyChunkDuration: '$itemName' output file missing or empty (${file.absolutePath})")
-            return false
-        }
-        // See verifyOutputResolution's note on [probe]: supplied where the
-        // caller has already probed this file, re-probed here otherwise.
-        val resolved = probe ?: probeMedia(file)
-        // The video track says how long a chunk is, not whichever track is
-        // longest. The audio runs a little past the video by construction --
-        // its window is cut on packet boundaries, and the first chunk's also
-        // carries the priming packet -- and a measure that followed it would
-        // drift away from the one thing the timeline is actually made of. The
-        // container's figure stays in the log.
-        val actualMs = resolved?.videoDurationMs ?: resolved?.formatDurationMs
-        if (actualMs == null) {
-            Log.e(TAG, "verifyChunkDuration: '$itemName' ffprobe could not read duration of ${file.absolutePath}")
-            return false
-        }
-        val shortfallMs = expectedMs - actualMs
-        val overrunMs = -shortfallMs
-        val ok = shortfallMs <= toleranceMs && overrunMs <= overrunToleranceMs
-        Log.d(TAG, "verifyChunkDuration: '$itemName' expected=${expectedMs}ms actual(video)=${actualMs}ms shortfall=${shortfallMs}ms (container=${resolved?.formatDurationMs}ms; tolerance ${toleranceMs}ms short / ${overrunToleranceMs}ms long) ${if (ok) "OK" else "REJECTED"}")
-        if (!ok && shortfallMs > toleranceMs) {
-            Log.e(TAG, "verifyChunkDuration: '$itemName' is ${shortfallMs}ms shorter than expected -- rejecting rather than shipping a silently truncated file")
-        } else if (!ok) {
-            Log.e(TAG, "verifyChunkDuration: '$itemName' is ${overrunMs}ms longer than expected -- rejecting rather than shipping content that overlaps the previous chunk")
-        } else if (overrunMs > 0) {
-            Log.d(TAG, "verifyChunkDuration: '$itemName' ran ${overrunMs}ms long, within the ${overrunToleranceMs}ms overrun tolerance -- accepted (encoder padding and clip-end rounding both land here)")
-        }
-        return ok
-    }
-
-    /**
-     * Confirms a just-muxed chunk actually has an audio track and that its
+     * Confirms the finished file actually has an audio track and that its
      * duration agrees with the video track's, tightly. This exists because
-     * [verifyChunkDuration] only checks the container's overall duration (and,
-     * for the video leg, only the video-only file before audio was even added)
-     * -- it could not catch a chunk that muxed "successfully" with no audio
-     * track at all (see the now-mandatory map in [remuxVideoAndAudio]), nor one
-     * where the independently-produced video and audio legs simply drifted
-     * apart by less than verifyChunkDuration's own tolerance.
+     * [verifyAssembledDuration] judges the video track alone -- it could not
+     * catch a file that merged "successfully" with no audio track at all, nor
+     * one where the independently-produced video and audio legs simply
+     * drifted apart by less than its own tolerance.
      */
     private suspend fun verifyMuxedAvSync(
         file: File,
@@ -5113,486 +3776,11 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         return ok
     }
 
-    /**
-     * Every keyframe's presentation timestamp in [item], in ms, sorted --
-     * cached per item, since the index is a property of the file and never
-     * changes. Null only if both probes fail, at which point
-     * [computeChunkBoundaries] gives up on keyframe-snapped chunks in favor
-     * of fixed-time ones.
-     *
-     * Two probes, tried in whichever order the input supports:
-     *  - **ffprobe `-skip_frame nokey`** reads the whole bitstream but only
-     *    decodes frame headers, not full frames -- fast even for a long
-     *    file, and with much wider container coverage. It leads for a real
-     *    local path.
-     *  - **[probeKeyframeTimestampsMsViaMediaExtractor]** leads for a
-     *    `pipe:0` input. ffprobe's pass comes back empty for a content://
-     *    [item] on a low-space device whose container keeps its keyframe
-     *    index anywhere but the front (moov/stss, for MP4 -- anything not
-     *    already "faststart"): indexing that over a pipe would mean seeking
-     *    back after reaching the end, and a pipe can't. MediaExtractor gets
-     *    real random access to [item.uri] via ContentResolver regardless of
-     *    whether a mirror exists, so on a pipe it is the likelier winner as
-     *    well as the cheaper one -- trying it second meant paying ffprobe's
-     *    full budget first to learn nothing.
-     *
-     * @param budgetMs wall-clock ceiling for each probe. The default is the
-     *   full [KEYFRAME_PROBE_TIMEOUT_MS]; the streaming path passes
-     *   [KEYFRAME_PROBE_STREAM_BUDGET_MS] instead.
-     * @param allowMirror whether resolving the input may copy a content://
-     *   source to local cache first. False on any path with a latency
-     *   deadline.
-     */
-    private suspend fun probeKeyframeTimestampsMs(
-        item: MediaCollection.MediaNode.Item,
-        budgetMs: Long = KEYFRAME_PROBE_TIMEOUT_MS,
-        allowMirror: Boolean = true
-    ): List<Long>? {
-        val cacheKey = item.id.toString()
-        keyframeIndex[cacheKey]?.let {
-            Log.d(TAG, "probeKeyframeTimestampsMs: '${item.name}' -- ${it.size} keyframe(s) already indexed, no probe needed")
-            return it
-        }
-
-        // allowMirror=false on the streaming path: resolveFfmpegInputPath can
-        // decide to mirror the entire source to cache, and doing that here would
-        // put a multi-gigabyte copy in front of the first byte sent to the
-        // renderer -- the same reason resolveSourceDurationMs uses the cheap
-        // form. A mirror some other call already paid for is still used.
-        // HOWEVER, if the container is unstreamable (AVI/WMV/etc.), we MUST mirror
-        // because the probe is guaranteed to fail over a pipe.
-        val mustMirror = allowMirror || isUnstreamable(item)
-        val input = if (mustMirror) {
-            resolveFfmpegInputPath(item)
-        } else {
-            alreadyLocalInputPath(item)?.let { ResolvedInput(it, null) } ?: ResolvedInput("pipe:0", item.uri)
-        }
-        val piped = input.isPiped
-
-        // Order by what the input can actually do. Over a pipe, ffprobe is
-        // forward-only and cannot reach a keyframe index that isn't near the
-        // front -- which is precisely the non-faststart case that put the item
-        // on the pipe path to begin with -- while MediaExtractor opens item.uri
-        // through ContentResolver, seeks freely, and reads the container's own
-        // sync-sample table. For a real local path ffprobe leads, for its much
-        // wider container coverage. This function's own doc comment reached that
-        // conclusion long before the code order agreed with it.
-        val timestamps = if (piped) {
-            Log.w(TAG, "12")
-            probeKeyframeTimestampsMsViaMediaExtractor(item, budgetMs)
-                ?: probeKeyframeTimestampsMsViaFfprobe(item, input, budgetMs)
-        } else {
-            Log.w(TAG, "13")
-            probeKeyframeTimestampsMsViaFfprobe(item, input, budgetMs)
-                ?: probeKeyframeTimestampsMsViaMediaExtractor(item, budgetMs)
-        }
-
-        if (timestamps != null) {
-            keyframeIndex[cacheKey] = timestamps
-        } else {
-            Log.w(TAG, "probeKeyframeTimestampsMs: '${item.name}' -- neither probe found keyframes within ${budgetMs}ms (input=${input.path}); computeChunkBoundaries will fall back to fixed-time chunks")
-        }
-        return timestamps
-    }
-
-    /** The ffprobe half of [probeKeyframeTimestampsMs]: one `-skip_frame nokey`
-     *  pass over [input]'s resolved path, bounded by [budgetMs]. Null on
-     *  failure or an empty parse, so the caller can try the other half. */
-    private suspend fun probeKeyframeTimestampsMsViaFfprobe(
-        item: MediaCollection.MediaNode.Item,
-        input: ResolvedInput,
-        budgetMs: Long
-    ): List<Long>? {
-        val ffprobeStartedAt = System.currentTimeMillis()
-        // Use default output format and parse manually with regex to be extremely resilient to variations
-        val args = listOf(ffprobePath, "-hide_banner", "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey", "-show_entries", "frame=pts_time", "-of", "csv=p=0", input.path)
-        val result = runProcessCapture(args, timeoutMs = budgetMs, stdinSource = input.stdinSource)
-        val ffprobeElapsedMs = System.currentTimeMillis() - ffprobeStartedAt
-
-        if (result.exitCode != 0) {
-            Log.w(TAG, "probeKeyframeTimestampsMsViaFfprobe: failed for '${item.name}' after ${ffprobeElapsedMs}ms (exitCode=${result.exitCode}, timedOut=${result.timedOut}, budget=${budgetMs}ms, input=${input.path}) -- see runProcessCapture's stderr-tail log above for detail")
-            return null
-        }
-        
-        val parsed = FFPROBE_NUMBER_REGEX.findAll(result.stdout)
-            .mapNotNull { it.value.toDoubleOrNull() }
-            .map { (it * 1000).toLong() }
-            .distinct()
-            .sorted()
-            .toList()
-
-        if (parsed.isEmpty()) {
-            Log.w(TAG, "probeKeyframeTimestampsMsViaFfprobe: exited OK for '${item.name}' in ${ffprobeElapsedMs}ms but parsed zero keyframes (input=${input.path}, stdout length=${result.stdout.length}) -- Stdout head: ${result.stdout.take(100)}")
-            return null
-        }
-        Log.d(TAG, "probeKeyframeTimestampsMsViaFfprobe: found ${parsed.size} keyframe(s) for '${item.name}' in ${ffprobeElapsedMs}ms, first=${parsed.first()}ms last=${parsed.last()}ms")
-        return parsed
-    }
-
-    /**
-     * Same job as the ffprobe pass in [probeKeyframeTimestampsMs] --
-     * keyframe presentation timestamps for [item]'s video track, in ms --
-     * via android.media.MediaExtractor instead of shelling out to ffprobe.
-     * Second choice for a real local path, where ffprobe's much wider
-     * container/codec coverage wins and this has no test coverage to match
-     * it. *First* choice for a `pipe:0` input, because it has two things
-     * ffprobe over a pipe doesn't:
-     *  - It opens [item.uri] directly (MediaExtractor#setDataSource(Context,
-     *    Uri, Map) goes through ContentResolver, in this process) and gets
-     *    real random access to it -- seeking freely -- rather than a
-     *    forward-only pipe. A container with its keyframe index at the end
-     *    (non-faststart MP4, e.g.) is exactly where ffprobe's pipe:0 pass
-     *    fails and this doesn't.
-     *  - Where the container has a proper sync-sample index, seeking
-     *    MediaExtractor with SEEK_TO_NEXT_SYNC jumps straight between
-     *    keyframes using that index, rather than reading every frame
-     *    header -- cheap even without ffprobe's own optimizations.
-     *
-     * Walks sync samples on the first video track from t=0, each time
-     * seeking just past the last one found, until a seek makes no forward
-     * progress (no more sync samples) or [KEYFRAME_EXTRACTOR_MAX_SAMPLES]
-     * is hit. Bounded by the lower of [KEYFRAME_EXTRACTOR_TIMEOUT_MS] and
-     * the caller's [budgetMs] -- best effort only: that guards how long the
-     * *caller* waits, but a genuinely wedged native call inside
-     * MediaExtractor (a hung content provider, say) can still keep the
-     * underlying IO thread blocked past it, same as [runProcessCapture]
-     * can't fully guarantee a stuck ffmpeg child releases its thread the
-     * instant its own timeout fires.
-     *
-     * Returns null if there's no video track, the source can't be opened,
-     * zero sync samples are found, or the probe times out.
-     */
-    private suspend fun probeKeyframeTimestampsMsViaMediaExtractor(
-        item: MediaCollection.MediaNode.Item,
-        budgetMs: Long = KEYFRAME_EXTRACTOR_TIMEOUT_MS
-    ): List<Long>? {
-        val startedAt = System.currentTimeMillis()
-        val effectiveTimeoutMs = budgetMs.coerceAtMost(KEYFRAME_EXTRACTOR_TIMEOUT_MS)
-        val result = withContext(Dispatchers.IO) {
-            withTimeoutOrNull(effectiveTimeoutMs) {
-                val extractor = MediaExtractor()
-                try {
-                    extractor.setDataSource(context, item.uri, null)
-
-                    // Find the best video track (largest resolution, avoiding thumbnails)
-                    var bestTrack = -1
-                    var maxPixels = -1
-                    for (i in 0 until extractor.trackCount) {
-                        val format = extractor.getTrackFormat(i)
-                        val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
-                        if (mime.startsWith("video/")) {
-                            // Avoid common thumbnail codecs if possible
-                            if (mime.contains("mjpeg") || mime.contains("image")) continue
-                            
-                            val w = format.getInteger(MediaFormat.KEY_WIDTH, 0)
-                            val h = format.getInteger(MediaFormat.KEY_HEIGHT, 0)
-                            val pixels = w * h
-                            if (pixels > maxPixels) {
-                                maxPixels = pixels
-                                bestTrack = i
-                            }
-                        }
-                    }
-                    
-                    // Fallback to first video track if no "good" track found
-                    if (bestTrack == -1) {
-                        bestTrack = (0 until extractor.trackCount).firstOrNull { i ->
-                            extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
-                        } ?: -1
-                    }
-
-                    if (bestTrack == -1) {
-                        Log.w(TAG, "probeKeyframeTimestampsMsViaMediaExtractor: '${item.name}' -- no video track found among ${extractor.trackCount} track(s)")
-                        return@withTimeoutOrNull null
-                    }
-                    extractor.selectTrack(bestTrack)
-                    Log.d(TAG, "probeKeyframeTimestampsMsViaMediaExtractor: '${item.name}' -- selected track $bestTrack (${extractor.getTrackFormat(bestTrack).getString(MediaFormat.KEY_MIME)})")
-
-                    val timestampsUs = mutableListOf<Long>()
-                    extractor.seekTo(0L, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-                    var lastSampleUs = -1L
-                    var consecutiveStalls = 0
-                    
-                    while (timestampsUs.size < KEYFRAME_EXTRACTOR_MAX_SAMPLES) {
-                        val sampleUs = extractor.sampleTime
-                        if (sampleUs < 0) break // end of stream
-                        
-                        val isSync = (extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0
-                        if (isSync && sampleUs > lastSampleUs) {
-                            timestampsUs.add(sampleUs)
-                            lastSampleUs = sampleUs
-                            consecutiveStalls = 0
-                        }
-                        
-                        // Attempt to jump to the next sync sample
-                        extractor.seekTo(lastSampleUs + 1, MediaExtractor.SEEK_TO_NEXT_SYNC)
-                        
-                        val newSampleUs = extractor.sampleTime
-                        if (newSampleUs <= lastSampleUs || newSampleUs < 0) {
-                            // Jump failed or end reached. Try manual advance to find the next sync point.
-                            var foundNext = false
-                            // Don't advance too many frames manually, it's too slow.
-                            // 1000 frames is ~30-40 seconds of content, a reasonable GOP limit.
-                            for (i in 0 until 1000) {
-                                if (!extractor.advance()) break
-                                if ((extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
-                                    foundNext = true
-                                    break
-                                }
-                            }
-                            if (!foundNext) {
-                                // If still no progress, try one last aggressive seek to where we think the next GOP might be
-                                consecutiveStalls++
-                                if (consecutiveStalls > 5) break // Really stuck
-                                
-                                val skipTarget = lastSampleUs + 5_000_000 // +5s
-                                extractor.seekTo(skipTarget, MediaExtractor.SEEK_TO_NEXT_SYNC)
-                                if (extractor.sampleTime <= lastSampleUs) break
-                            }
-                        }
-                    }
-                    if (timestampsUs.size >= KEYFRAME_EXTRACTOR_MAX_SAMPLES) {
-                        Log.w(TAG, "probeKeyframeTimestampsMsViaMediaExtractor: '${item.name}' -- hit the $KEYFRAME_EXTRACTOR_MAX_SAMPLES-sample cap, stopping early")
-                    }
-                    if (timestampsUs.isEmpty()) {
-                        Log.w(TAG, "probeKeyframeTimestampsMsViaMediaExtractor: '${item.name}' -- video track $bestTrack selected but zero sync samples found")
-                        return@withTimeoutOrNull null
-                    }
-
-                    timestampsUs.map { it / 1000 }.sorted()
-                } catch (e: Exception) {
-                    Log.w(TAG, "probeKeyframeTimestampsMsViaMediaExtractor: '${item.name}' failed: ${e.message}")
-                    null
-                } finally {
-                    try { extractor.release() } catch (e: Exception) {}
-                }
-            }
-        }
-        val elapsedMs = System.currentTimeMillis() - startedAt
-        Log.d(TAG, "probeKeyframeTimestampsMsViaMediaExtractor: '${item.name}' -- finished after ${elapsedMs}ms, ${result?.size ?: 0} keyframe(s) (null=${result == null}, budget=${effectiveTimeoutMs}ms, possibleTimeout=${result == null && elapsedMs >= effectiveTimeoutMs})")
-        if (result != null && result.isNotEmpty()) {
-            Log.d(TAG, "probeKeyframeTimestampsMsViaMediaExtractor: '${item.name}' -- first=${result.first()}ms last=${result.last()}ms")
-        }
-        return result
-    }
-
-    /**
-     * One chunk's `[startMs, startMs + durationMs)` window, plus whether
-     * [startMs] is a *verified* real source keyframe rather than merely the
-     * nominal target the snap loop below was aiming for.
-     *
-     * `true` for a range start of 0ms (the first frame of any valid
-     * container is a keyframe by construction, independent of whether the
-     * probe below happened to succeed) and for every cut point that came
-     * directly out of the probed keyframe list. `false` for every boundary
-     * produced by the fixed-time fallback, and for a nonzero range start
-     * that isn't independently confirmed to be a keyframe.
-     *
-     * [transcodeViaSafePath] uses this to tell Media3 the start position is
-     * already a valid random-access point
-     * (`ClippingConfiguration.setStartsAtKeyFrame`) only when that claim is
-     * actually true -- asserting it for an unverified position risks
-     * skipping decoding Media3 genuinely needs, which is worse than not
-     * asserting it at all.
-     */
-    private data class ChunkBoundary(val startMs: Long, val durationMs: Long, val startsAtVerifiedKeyframe: Boolean)
-
-    /**
-     * Chunk boundaries for [rangeStartMs, rangeStartMs + totalDurationMs),
-     * each snapped to the nearest actual source keyframe at or after its
-     * nominal target -- the same rule ffmpeg's own segment muxer uses
-     * without forced keyframes. A boundary that falls mid-GOP has no
-     * natural cut point: the previous chunk's independent re-encode and the
-     * next chunk's independent re-encode each decide, on their own, what
-     * "the frame at time T" means, with no guarantee they agree -- risking
-     * a duplicated or dropped frame, and a small audio discontinuity, at
-     * every chunk boundary. Snapping both sides of a cut to the same real
-     * keyframe timestamp removes the *ambiguity* in what the cut point
-     * should be. Chunks won't be exactly [chunkTargetMs] as a result --
-     * that's expected, not a bug.
-     *
-     * Removing the ambiguity in what the cut point *should* be is not the
-     * same claim as either chunk's independent decoder actually *landing*
-     * on that exact frame -- confirmed by direct testing against this exact
-     * algorithm (software decode, ffmpeg's own accurate-seek, snapped
-     * keyframes in, zero dropped or duplicated frames out against a
-     * frame-indexed reference), but that test exercises the demuxer/seek
-     * math this function controls, not `-hwaccel mediacodec` decode or
-     * Media3 Transformer's own clip-boundary frame selection -- both real
-     * decoders this file hands the *result* to, on hardware this test
-     * cannot reach. Each strategy now verifies its own landing rather than
-     * trusting it: see the `-copyts` verification in
-     * [transcodeViaHardwareFfmpeg] and [startsAtVerifiedKeyframe] /
-     * `setStartsAtKeyFrame` in [transcodeViaSafePath] (the latter directly
-     * targets a confirmed, if since-fixed, Transformer bug in exactly this
-     * area -- androidx/media#829).
-     *
-     * Falls back to fixed-time slicing if the keyframe probe fails or
-     * returns nothing usable in range, rather than blocking on it -- every
-     * boundary from that fallback carries `startsAtVerifiedKeyframe =
-     * false` (barring rangeStartMs 0), since a fixed-time cut is exactly
-     * the mid-GOP, no-natural-cut-point case two paragraphs up describes.
-     */
-    private suspend fun computeChunkBoundaries(
-        item: MediaCollection.MediaNode.Item,
-        chunkTargetMs: Long,
-        rangeStartMs: Long,
-        rangeDurationMs: Long?,
-        keyframeBudgetMs: Long = KEYFRAME_PROBE_TIMEOUT_MS,
-        allowMirror: Boolean = true
-    ): List<ChunkBoundary> {
-        val totalDurationMs = rangeDurationMs ?: (resolveSourceDurationMs(item) - rangeStartMs)
-        val rangeEndMs = rangeStartMs + totalDurationMs
-
-        val probeStartedAt = System.currentTimeMillis()
-        Log.w(TAG, "11")
-        val rawKeyframes = probeKeyframeTimestampsMs(item, keyframeBudgetMs, allowMirror)
-        val probeElapsedMs = System.currentTimeMillis() - probeStartedAt
-        Log.d(TAG, "computeChunkBoundaries: '${item.name}' -- keyframe probe took ${probeElapsedMs}ms, returned ${rawKeyframes?.size ?: 0} timestamp(s) total (null=${rawKeyframes == null}, uri=${item.uri}, scheme=${item.uri.scheme})")
-
-        val keyframes = rawKeyframes?.filter { it in rangeStartMs..rangeEndMs }
-        if (rawKeyframes != null) {
-            Log.d(TAG, "computeChunkBoundaries: '${item.name}' -- ${keyframes?.size ?: 0}/${rawKeyframes.size} keyframe(s) fall within requested range [$rangeStartMs, $rangeEndMs)")
-        }
-
-        // True independent of whether the probe above succeeded: the first
-        // frame of any valid container is a keyframe. A nonzero
-        // rangeStartMs is verified only if the probe both succeeded and
-        // happens to have found this exact timestamp.
-        val rangeStartIsKeyframe = rangeStartMs == 0L || keyframes?.contains(rangeStartMs) == true
-
-        if (keyframes.isNullOrEmpty()) {
-            val reason = when {
-                rawKeyframes == null -> "both the ffprobe and MediaExtractor keyframe probes failed, found nothing, or timed out (see probeKeyframeTimestampsMs/probeKeyframeTimestampsMsViaMediaExtractor logs above for detail)"
-                rawKeyframes.isEmpty() -> "keyframe probe ran but returned zero timestamps"
-                else -> "keyframe probe returned ${rawKeyframes.size} timestamp(s) (first=${rawKeyframes.first()}ms, last=${rawKeyframes.last()}ms) but none fall in the requested range [$rangeStartMs, $rangeEndMs) -- check rangeStartMs/item.durationMs for a mismatch"
-            }
-            Log.w(TAG, "computeChunkBoundaries: '${item.name}' falling back to fixed-time chunks after ${probeElapsedMs}ms -- $reason")
-            val boundaries = mutableListOf<ChunkBoundary>()
-            var t = rangeStartMs
-            while (t < rangeEndMs) {
-                val dur = min(chunkTargetMs, rangeEndMs - t)
-                boundaries.add(ChunkBoundary(t, dur, startsAtVerifiedKeyframe = t == rangeStartMs && rangeStartIsKeyframe))
-                t += dur
-            }
-            Log.d(TAG, "computeChunkBoundaries: '${item.name}' -- ${boundaries.size} fixed-time chunk(s) of up to ${chunkTargetMs}ms each")
-            return boundaries
-        }
-
-        val cutPoints = mutableListOf(rangeStartMs)
-        var nextTarget = rangeStartMs + chunkTargetMs
-        while (nextTarget < rangeEndMs) {
-            val snapped = keyframes.firstOrNull { it >= nextTarget } ?: rangeEndMs
-            if (snapped <= cutPoints.last()) {
-                Log.d(TAG, "computeChunkBoundaries: '${item.name}' -- no further usable keyframe at/after target ${nextTarget}ms (last cut point was ${cutPoints.last()}ms), stopping snap loop early with ${cutPoints.size} cut point(s) so far")
-                break // no further usable keyframe before the end
-            }
-            cutPoints.add(snapped)
-            nextTarget = snapped + chunkTargetMs
-        }
-        if (cutPoints.last() < rangeEndMs) {
-            Log.d(TAG, "computeChunkBoundaries: '${item.name}' -- appending final cut point at rangeEndMs=${rangeEndMs}ms (last keyframe-snapped cut was ${cutPoints.last()}ms, ${rangeEndMs - cutPoints.last()}ms short)")
-            cutPoints.add(rangeEndMs)
-        }
-
-        // Every cutPoints entry from index 1 on came directly out of
-        // `keyframes` (the loop above only ever adds a `snapped` value or
-        // breaks) so is verified by construction; only index 0 depends on
-        // rangeStartIsKeyframe. cutPoints' own last entry is only ever used
-        // below as an END (zipWithNext pairs it that way), so the
-        // occasional synthetic rangeEndMs appended just above never gets
-        // mistaken for a verified START.
-        val boundaries = cutPoints.zipWithNext { start, end -> start to (end - start) }
-            .mapIndexed { i, (start, dur) -> ChunkBoundary(start, dur, startsAtVerifiedKeyframe = if (i == 0) rangeStartIsKeyframe else true) }
-        Log.d(TAG, "computeChunkBoundaries: '${item.name}' -- ${boundaries.size} keyframe-snapped chunk(s): ${boundaries.joinToString { "[${it.startMs}+${it.durationMs}]" }}")
-        return boundaries
-    }
-
-    /**
-     * Fragmented MP4 chunks each start with their own ftyp+moov(empty)
-     * header, which only the first chunk appended to a stream may keep --
-     * a second header mid-stream would confuse most demuxers. Scans
-     * forward past top-level ISO-BMFF boxes (4-byte big-endian size +
-     * 4-byte ASCII type, or an 8-byte extended size when size==1) and
-     * returns the byte offset of the first 'moof' box. Falls back to 0
-     * (send the whole chunk as-is) if no moof is found -- shouldn't happen
-     * for genuinely fragmented ffmpeg output, but avoids silently
-     * corrupting the stream if it ever does.
-     *
-     * The extended-size branch reads 8 bytes past the `pos + 8 <= len` guard
-     * above it, with nothing checking those 8 bytes are actually there -- a
-     * chunk truncated right after such a header throws EOFException, which
-     * used to propagate out of the responder and kill the connection with a
-     * stack trace instead of just sending from offset 0 like any other
-     * unparseable case here already does.
-     */
-    private fun findFirstMoofOffset(file: File): Long = try {
-        RandomAccessFile(file, "r").use { raf ->
-            var pos = 0L
-            val len = raf.length()
-            while (pos + 8 <= len) {
-                raf.seek(pos)
-                val header = ByteArray(8)
-                raf.readFully(header)
-                var boxSize = ((header[0].toLong() and 0xFF) shl 24) or ((header[1].toLong() and 0xFF) shl 16) or
-                        ((header[2].toLong() and 0xFF) shl 8) or (header[3].toLong() and 0xFF)
-                val type = String(header, 4, 4, Charsets.US_ASCII)
-                if (boxSize == 1L) {
-                    val ext = ByteArray(8)
-                    raf.readFully(ext)
-                    boxSize = 0L
-                    for (b in ext) boxSize = (boxSize shl 8) or (b.toLong() and 0xFF)
-                }
-                if (type == "moof") return pos
-                if (boxSize <= 0L) break
-                pos += boxSize
-            }
-        }
-        0L
-    } catch (e: EOFException) {
-        Log.w(TAG, "findFirstMoofOffset: truncated file ${file.absolutePath} -- sending from offset 0")
-        0L
-    }
-
-    /**
-     * Seam-stutter fix (streaming investigation, see TranscoderController_Seam_Investigation.md).
-     *
-     * Every streamed chunk is a separate ffmpeg/Transformer invocation. Input-side
-     * seeking (-ss before -i for ffmpeg; Media3's ClippingConfiguration for the
-     * safe path) resets each invocation's own output timeline to start near zero
-     * -- this is ffmpeg's own documented behavior, confirmed directly: a synthetic
-     * two-chunk test showed chunk 1's internal pts_time running 0.0-7.98s, byte
-     * for byte identical to chunk 0's, despite representing entirely different
-     * source content. findFirstMoofOffset strips a later chunk's ftyp/moov and
-     * sends its raw moof/mdat bytes straight onto the HTTP response with nothing
-     * correcting the fragment's own tfdt (track fragment decode time) -- so the
-     * composite stream's declared timeline snaps backward at every chunk seam.
-     * Verified with ffprobe: an unpatched two-chunk composite reported half its
-     * true duration and a single non-monotonic timestamp landing exactly on the
-     * seam. -output_ts_offset was tried first and does not fix this -- confirmed
-     * by comparing the raw tfdt bytes with and without it: identical either way.
-     *
-     * The functions below patch each fragment's tfdt.baseMediaDecodeTime in place
-     * so it reflects the chunk's real position in the streaming session's
-     * timeline instead. Verified end to end: a patched two-chunk composite's
-     * reported duration and packet timeline are now indistinguishable from a
-     * single unchunked reference encode of the same content (both report
-     * duration=16.023281s; 0 non-increasing transitions; the seam itself reads
-     * ...7.983281, 8.0, 8.063281... -- continuous).
-     *
-     * verifyChunkDuration/verifyOutputResolution/verifyMuxedAvSync can't see this
-     * defect and tightening them can't catch it either: every chunk file is
-     * completely correct in isolation (the right duration, the right resolution,
-     * audio and video in sync with each other) -- it's the composite byte stream
-     * this section assembles afterward where the problem lives, and none of
-     * those checks ever look at that.
-     */
-
     /** Reads one 4-byte-size-or-extended + 4-byte-type ISO-BMFF box header at
-     *  [pos], the same layout findFirstMoofOffset already parses. Returns
+     *  [pos], the same layout the other box readers here parse. Returns
      *  (type, boxSize) or null if there isn't room for a full header (or a
-     *  full extended-size header) at [pos] -- callers treat that the same way
-     *  findFirstMoofOffset treats a parse failure: stop, don't guess. */
+     *  full extended-size header) at [pos] -- callers treat that as a
+     *  parse failure: stop, don't guess. */
     private fun readBoxHeader(raf: RandomAccessFile, pos: Long): Pair<String, Long>? {
         val len = raf.length()
         if (pos + 8 > len) return null
@@ -5625,16 +3813,6 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         return v
     }
 
-    private fun RandomAccessFile.writeIntBE(v: Int) {
-        write(byteArrayOf((v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte()))
-    }
-
-    private fun RandomAccessFile.writeLongBE(v: Long) {
-        val b = ByteArray(8)
-        for (i in 0 until 8) b[i] = (v ushr (8 * (7 - i))).toByte()
-        write(b)
-    }
-
     /** Walks [start, end) for a direct child box of type [targetType]. Not
      *  recursive -- callers pass the exact byte range of the parent box's own
      *  content, one nesting level at a time (moov -> trak -> tkhd/mdia,
@@ -5648,160 +3826,6 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             pos += size
         }
         return null
-    }
-
-    /** Reads each track's ID (tkhd) and timescale (mdia/mdhd) from [file]'s
-     *  still-present moov. Must run against chunk 0 specifically, once per
-     *  streaming session, before its file gets overwritten by chunk 1 -- chunk
-     *  0 is the only chunk sent with its moov intact (see the streaming loop
-     *  in transcodeMediaFile). Every later chunk in the same session shares
-     *  these track IDs and timescales: same item, same codec, same settings,
-     *  for the life of the session. Returns an empty map on anything
-     *  unparseable rather than throwing -- patchFragmentTimestamps treats an
-     *  empty map as "leave this chunk alone", the same fail-open posture
-     *  findFirstMoofOffset already takes on a chunk it can't parse. */
-    private fun readTrackTimescales(file: File): Map<Int, Int> {
-        val result = mutableMapOf<Int, Int>()
-        try {
-            RandomAccessFile(file, "r").use { raf ->
-                val len = raf.length()
-                val moov = findTopLevelBox(raf, 0L, len, "moov") ?: return emptyMap()
-                var pos = moov.first + 8
-                while (pos + 8 <= moov.second) {
-                    val (type, size) = readBoxHeader(raf, pos) ?: break
-                    if (type == "trak") {
-                        val trakEnd = pos + size
-                        val tkhd = findTopLevelBox(raf, pos + 8, trakEnd, "tkhd")
-                        val mdia = findTopLevelBox(raf, pos + 8, trakEnd, "mdia")
-                        if (tkhd != null && mdia != null) {
-                            raf.seek(tkhd.first + 8)
-                            val tkhdVersion = raf.readByte().toInt()
-                            raf.seek(tkhd.first + 8 + (if (tkhdVersion == 1) 20 else 12))
-                            val trackId = raf.readIntBE()
-                            val mdhd = findTopLevelBox(raf, mdia.first + 8, mdia.second, "mdhd")
-                            if (mdhd != null) {
-                                raf.seek(mdhd.first + 8)
-                                val mdhdVersion = raf.readByte().toInt()
-                                raf.seek(mdhd.first + 8 + (if (mdhdVersion == 1) 20 else 12))
-                                val timescale = raf.readIntBE()
-                                result[trackId] = timescale
-                            }
-                        }
-                    }
-                    if (size <= 0L) break
-                    pos += size
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "readTrackTimescales: couldn't parse ${file.absolutePath}'s moov (${e.message}) -- later chunks in this session will be sent unpatched")
-            return emptyMap()
-        }
-        return result
-    }
-
-    private fun patchTrafAt(raf: RandomAccessFile, start: Long, end: Long, trackOffsetsTicks: Map<Int, Long>) {
-        var trackId: Int? = null
-        var tfdtValuePos = -1L
-        var tfdtIs64Bit = false
-        var pos = start + 8
-        while (pos + 8 <= end) {
-            val (type, size) = readBoxHeader(raf, pos) ?: break
-            when (type) {
-                "tfhd" -> {
-                    raf.seek(pos + 8 + 4) // box header(8) + version/flags(4) -> track_ID
-                    trackId = raf.readIntBE()
-                }
-                "tfdt" -> {
-                    raf.seek(pos + 8)
-                    tfdtIs64Bit = raf.readByte().toInt() == 1
-                    tfdtValuePos = pos + 8 + 4 // version/flags(4) -> baseMediaDecodeTime
-                }
-            }
-            if (size <= 0L) break
-            pos += size
-        }
-        val offsetTicks = trackId?.let { trackOffsetsTicks[it] } ?: return
-        if (tfdtValuePos < 0 || offsetTicks == 0L) return
-        if (tfdtIs64Bit) {
-            raf.seek(tfdtValuePos)
-            val cur = raf.readLongBE()
-            raf.seek(tfdtValuePos)
-            raf.writeLongBE(cur + offsetTicks)
-        } else {
-            raf.seek(tfdtValuePos)
-            val cur = raf.readIntBE().toLong() and 0xFFFFFFFFL
-            raf.seek(tfdtValuePos)
-            raf.writeIntBE(((cur + offsetTicks) and 0xFFFFFFFFL).toInt())
-        }
-    }
-
-    private fun patchMoofAt(raf: RandomAccessFile, start: Long, end: Long, trackOffsetsTicks: Map<Int, Long>) {
-        var pos = start + 8
-        while (pos + 8 <= end) {
-            val (type, size) = readBoxHeader(raf, pos) ?: break
-            if (type == "traf") patchTrafAt(raf, pos, pos + size, trackOffsetsTicks)
-            if (size <= 0L) break
-            pos += size
-        }
-    }
-
-    /**
-     * Rewrites every fragment's tfdt.baseMediaDecodeTime in [file], in place,
-     * adding [trackOffsetsTicks] -- per track ID, in *that track's own
-     * ticks*. Called for every chunk after the first, in the streaming path
-     * and in file-save assembly alike.
-     *
-     * Per-track and in ticks, rather than one figure in milliseconds, since
-     * the tracks no longer belong at the same time: a chunk's video starts
-     * at its keyframe, but its audio slice starts at the first audio packet
-     * at or after that, up to one packet (21ms) later, and that offset
-     * differs chunk to chunk. Placing both by one millisecond figure would
-     * put every audio seam up to a packet off the packet grid, a different
-     * amount each time; placing the audio at its slice's exact first-packet
-     * time ([audioFirstTickFor]) is what makes the assembled audio
-     * track exactly continuous: every packet lands on the packet grid, and
-     * decoding an assembled file gives, sample for sample, what decoding the
-     * single encode it was cut from gives (no sample differs, the first
-     * block included, because the priming packet is kept and declared) --
-     * where a uniform millisecond offset left irregular packet spacing at
-     * every seam. Build the map with [chunkPlacementTicks].
-     *
-     * The video figure must be time elapsed since this session's FIRST
-     * chunk -- chunkStartMs minus chunkBoundaries.first().startMs, NOT the
-     * chunk's raw position in the source file. Chunk 0 always starts a fresh
-     * HTTP response at its own local zero (that's correct, and it's why it's
-     * sent unpatched); every later chunk must stay relative to *that*, not to
-     * the source file's own absolute timeline. Verified concretely why this
-     * distinction matters, not just asserted: patching with the source-absolute
-     * timestamp instead (i.e. as if the offset were chunkStartMs) was tested
-     * against a session starting at a 40s seek -- it produces a stream whose
-     * declared duration is right for the wrong reason (56s instead of 16s) and
-     * leaves a 40-second gap with zero frames in it between chunk 0's end and
-     * chunk 1's start, which no real player would recover from cleanly. Using
-     * the session-relative offset on the same input gives the correct 16s,
-     * fully continuous, matching an unchunked reference exactly.
-     *
-     * No-ops if [trackOffsetsTicks] is empty (readTrackTimescales couldn't
-     * parse chunk 0's moov) or has nothing but zeros -- both leave the chunk
-     * exactly as it would have been sent before this fix, rather than risking
-     * a worse, half-patched fragment.
-     */
-    private fun patchFragmentTimestamps(file: File, trackOffsetsTicks: Map<Int, Long>) {
-        if (trackOffsetsTicks.values.all { it == 0L }) return
-        try {
-            RandomAccessFile(file, "rw").use { raf ->
-                var pos = 0L
-                val len = raf.length()
-                while (pos + 8 <= len) {
-                    val (type, size) = readBoxHeader(raf, pos) ?: break
-                    if (type == "moof") patchMoofAt(raf, pos, pos + size, trackOffsetsTicks)
-                    if (size <= 0L) break
-                    pos += size
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "patchFragmentTimestamps: failed on ${file.absolutePath} (${e.message}) -- this chunk will play with a seam discontinuity")
-        }
     }
 
     /** media_time of the first entry of the `elst` box at [elstPos], in the
@@ -5856,108 +3880,6 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
             Log.w(TAG, "readAudioEditListStartTicks: couldn't parse ${file.absolutePath}'s moov (${e.message})")
         }
         return null
-    }
-
-    /** Track ID of [file]'s first audio ("soun") track, or null if it has none
-     *  or its moov can't be read. Same walk as [readTrackTimescales], and the
-     *  same reason to run it once against chunk 0: it is the only chunk with
-     *  its moov intact, and every later chunk shares its track IDs. Needed to
-     *  tell which track [chunkPlacementTicks] should place on the audio grid
-     *  and which by the video's keyframe. */
-    private fun readAudioTrackId(file: File): Int? {
-        try {
-            RandomAccessFile(file, "r").use { raf ->
-                val len = raf.length()
-                val moov = findTopLevelBox(raf, 0L, len, "moov") ?: return null
-                var pos = moov.first + 8
-                while (pos + 8 <= moov.second) {
-                    val (type, size) = readBoxHeader(raf, pos) ?: break
-                    if (type == "trak") {
-                        val trakEnd = pos + size
-                        val tkhd = findTopLevelBox(raf, pos + 8, trakEnd, "tkhd")
-                        val mdia = findTopLevelBox(raf, pos + 8, trakEnd, "mdia")
-                        val hdlr = mdia?.let { findTopLevelBox(raf, it.first + 8, it.second, "hdlr") }
-                        if (tkhd != null && hdlr != null) {
-                            raf.seek(hdlr.first + 16) // header(8) + version/flags(4) + pre_defined(4) -> handler_type
-                            val handler = ByteArray(4)
-                            raf.readFully(handler)
-                            if (String(handler, Charsets.US_ASCII) == "soun") {
-                                raf.seek(tkhd.first + 8)
-                                val tkhdVersion = raf.readByte().toInt()
-                                raf.seek(tkhd.first + 8 + (if (tkhdVersion == 1) 20 else 12))
-                                return raf.readIntBE()
-                            }
-                        }
-                    }
-                    if (size <= 0L) break
-                    pos += size
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "readAudioTrackId: couldn't parse ${file.absolutePath}'s moov (${e.message})")
-        }
-        return null
-    }
-
-    /**
-     * Read-only counterpart to [patchTrafAt]: each track's first
-     * tfdt.baseMediaDecodeTime in [file] (the first moof only), converted to
-     * ms with [trackTimescales], keyed by track ID. Empty on any parse
-     * failure or when a track's timescale isn't known -- this exists purely
-     * so [concatChunksFragmented] can confirm from the bytes themselves what
-     * [patchFragmentTimestamps] actually wrote, and must never be able to
-     * break the splice it's checking.
-     */
-    private fun readFirstFragmentDecodeTimesMs(file: File, trackTimescales: Map<Int, Int>): Map<Int, Long> {
-        val result = LinkedHashMap<Int, Long>()
-        try {
-            RandomAccessFile(file, "r").use { raf ->
-                val len = raf.length()
-                var pos = 0L
-                while (pos + 8 <= len) {
-                    val (type, size) = readBoxHeader(raf, pos) ?: break
-                    if (type == "moof") {
-                        val moofEnd = pos + size
-                        var trafPos = pos + 8
-                        while (trafPos + 8 <= moofEnd) {
-                            val (trafType, trafSize) = readBoxHeader(raf, trafPos) ?: break
-                            if (trafType == "traf") {
-                                var trackId: Int? = null
-                                var baseTicks: Long? = null
-                                val trafEnd = trafPos + trafSize
-                                var boxPos = trafPos + 8
-                                while (boxPos + 8 <= trafEnd) {
-                                    val (boxType, boxSize) = readBoxHeader(raf, boxPos) ?: break
-                                    if (boxType == "tfhd") {
-                                        raf.seek(boxPos + 8 + 4) // header(8) + version/flags(4) -> track_ID
-                                        trackId = raf.readIntBE()
-                                    } else if (boxType == "tfdt") {
-                                        raf.seek(boxPos + 8)
-                                        val version = raf.readByte().toInt()
-                                        raf.seek(boxPos + 8 + 4) // version/flags(4) -> baseMediaDecodeTime
-                                        baseTicks = if (version == 1) raf.readLongBE() else (raf.readIntBE().toLong() and 0xFFFFFFFFL)
-                                    }
-                                    if (boxSize <= 0L) break
-                                    boxPos += boxSize
-                                }
-                                val timescale = trackId?.let { trackTimescales[it] }
-                                if (trackId != null && baseTicks != null && timescale != null && timescale > 0) {
-                                    result[trackId] = baseTicks * 1000 / timescale
-                                }
-                            }
-                            if (trafSize <= 0L) break
-                            trafPos += trafSize
-                        }
-                        return result
-                    }
-                    if (size <= 0L) break
-                    pos += size
-                }
-            }
-        } catch (e: Exception) {
-            // Diagnostic only -- an unreadable file just yields an empty map.
-        }
-        return result
     }
 
     private data class ProcessOutput(val exitCode: Int, val stdout: String, val stderr: String, val timedOut: Boolean = false)
@@ -6156,4 +4078,1247 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         processIoDispatcher.close()
     }
     private fun stopPlayingLocal() { repo.setSeekBarDuration("00:00:00"); repo.setSeekBarPosition("00:00:00") }
+}
+
+
+// =========================================================================
+// Merging the two encoders' fragmented mp4 output while it is still being
+// written. Everything from here to the end of the file belongs to
+// TranscoderController's single-pass pipeline (see runLegsOnce and
+// transcodeSinglePass above); it is kept at file level, outside the class,
+// because none of it needs the controller and it can be read -- and tested --
+// on its own.
+// =========================================================================
+
+/*
+ * The two "legs" of a transcode -- one video encode and one audio encode, each
+ * running once over the whole range and each writing a fragmented mp4 -- and
+ * the assembler that merges them into the output while they are still being
+ * written.
+ *
+ * Nothing in here knows about Android, ffmpeg or Media3: a leg is "a fragmented
+ * mp4 that grows by whole moof+mdat fragments", whoever writes it and wherever
+ * it goes. That keeps the whole file testable on a plain JVM against real
+ * ffmpeg output.
+ *
+ * Why this exists. The video used to be encoded in ~30 s chunks, each an
+ * independent process with its own timeline, and joined afterwards. Every join
+ * was a place where a frame could be held, dropped or doubled (the seam
+ * artefacts). The audio had already moved to one encode, sliced into the
+ * chunks. Now the video is one encode too, so there is no join to get wrong:
+ * the assembler never re-times, re-cuts or re-encodes anything. It copies each
+ * leg's fragments, byte for byte, in presentation order, behind one merged
+ * moov. The only things it rewrites are the bookkeeping fields that make the
+ * two streams into one: track ids, fragment sequence numbers and (when a
+ * writer used absolute offsets) the fragment base offset.
+ *
+ * A leg reaches the assembler one of two ways:
+ *
+ *  - As a FILE that is tailed while the encoder appends to it (saving to disk).
+ *    Fragments are indexed in place, their bytes stay in the file, and the
+ *    file is deleted when the run ends.
+ *
+ *  - Through a PIPE (a FIFO the encoder writes to) that is read as it fills
+ *    (streaming). Each fragment is held in memory until the assembler has
+ *    written it, then dropped. Nothing accumulates on disk, and -- the point
+ *    of it -- when too much is queued the reader simply stops reading, the
+ *    pipe fills, and the encoder blocks in its own write call. The encoders
+ *    are therefore paced by whoever consumes the stream, which a growing file
+ *    can never do.
+ */
+
+private const val ASSEMBLER_TAG = "FragmentAssembler"
+
+/** How often a tailed file is re-scanned, and the assembler re-checks the legs. */
+internal const val LEG_POLL_MS = 150L
+
+/** How often an idle pipe is re-checked. Short, because a pipe holds only ~64 KB: a slow reader stalls the encoder. */
+internal const val PIPE_POLL_MS = 4L
+
+/** Upper bounds on boxes read whole into memory; anything larger is not a header/fragment we understand. */
+private const val MAX_HEADER_BOX_BYTES = 4L * 1024 * 1024
+private const val MAX_MOOF_BYTES = 32L * 1024 * 1024
+private const val MAX_FRAGMENT_BYTES = 512L * 1024 * 1024
+
+// ---------------------------------------------------------------------------
+// Byte-level helpers
+// ---------------------------------------------------------------------------
+
+private fun ByteArray.u8(o: Int): Int = this[o].toInt() and 0xFF
+private fun ByteArray.u32(o: Int): Long =
+    (u8(o).toLong() shl 24) or (u8(o + 1).toLong() shl 16) or (u8(o + 2).toLong() shl 8) or u8(o + 3).toLong()
+private fun ByteArray.i32(o: Int): Int = u32(o).toInt()
+private fun ByteArray.u64(o: Int): Long = (u32(o) shl 32) or u32(o + 4)
+private fun ByteArray.fourcc(o: Int): String = String(this, o, 4, Charsets.ISO_8859_1)
+private fun ByteArray.put32(o: Int, v: Int) {
+    this[o] = (v ushr 24).toByte(); this[o + 1] = (v ushr 16).toByte()
+    this[o + 2] = (v ushr 8).toByte(); this[o + 3] = v.toByte()
+}
+private fun ByteArray.put64(o: Int, v: Long) { put32(o, (v ushr 32).toInt()); put32(o + 4, v.toInt()) }
+
+private class BoxRef(val type: String, val start: Int, val end: Int, val payload: Int)
+
+/** The boxes directly inside [from, to) of this buffer; stops at the first malformed one. */
+private fun ByteArray.boxes(from: Int, to: Int): List<BoxRef> {
+    val out = ArrayList<BoxRef>()
+    var p = from
+    while (p + 8 <= to) {
+        var size = u32(p)
+        val type = fourcc(p + 4)
+        var hdr = 8
+        if (size == 1L) {
+            if (p + 16 > to) break
+            size = u64(p + 8); hdr = 16
+        } else if (size == 0L) {
+            size = (to - p).toLong()
+        }
+        if (size < hdr || p + size > to) break
+        out += BoxRef(type, p, (p + size).toInt(), p + hdr)
+        p += size.toInt()
+    }
+    return out
+}
+
+private fun mp4Box(type: String, vararg parts: ByteArray): ByteArray {
+    val payload = parts.sumOf { it.size }
+    val out = ByteArray(8 + payload)
+    out.put32(0, out.size)
+    for (i in 0 until 4) out[4 + i] = type[i].code.toByte()
+    var o = 8
+    for (p in parts) { p.copyInto(out, o); o += p.size }
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// What a leg tells us about itself
+// ---------------------------------------------------------------------------
+
+/**
+ * One complete moof+mdat pair. Times are in the leg's own track timescale.
+ *
+ * A fragment either still lies in the leg's file ([data] null, bytes at
+ * [byteStart] until [byteEnd]) or, for a pipe leg, carries its own bytes in
+ * [data] (the whole moof+mdat). In both cases [byteStart] is where the moof
+ * began in the stream the encoder wrote, which is what an absolute
+ * base_data_offset has to be moved from.
+ */
+internal class LegFragment(
+    val startTicks: Long,
+    val durationTicks: Long,
+    val sampleCount: Int,
+    /** Size of the moof at the start of the fragment's bytes. */
+    val moofSize: Int,
+    val byteStart: Long,
+    val byteEnd: Long,
+    val data: ByteArray?,
+    /** Duration of the fragment's last sample as the writer recorded it, in ticks; -1 when the trun carries no per-sample durations. */
+    val lastSampleDuration: Long = -1L,
+    /** What that duration has to be instead (see [FragmentTimeCorrector]); -1 leaves it as written. */
+    val lastDurationOverride: Long = -1L
+) {
+    val endTicks: Long get() = startTicks + durationTicks
+}
+
+/**
+ * The parts of a leg's moov the merged header is built from. The boxes are raw
+ * copies: the merge never re-encodes a sample description, an edit list or a
+ * codec configuration, it only decides which of them go in front of the
+ * fragments.
+ */
+internal class LegHeader(
+    val ftyp: ByteArray?,
+    val mvhd: ByteArray,
+    val trak: ByteArray,
+    val trex: ByteArray,
+    val trackId: Int,
+    /** Where tkhd's track_ID sits inside [trak]. */
+    val trackIdOffsetInTrak: Int,
+    val timescale: Int,
+    /** "vide" or "soun". */
+    val handler: String,
+    /**
+     * Where presentation starts inside the track's own media timeline, per the
+     * edit list: 0 for video, the encoder-delay (priming) packet for AAC. A
+     * fragment at media time t is presented at t - [editStartTicks].
+     */
+    val editStartTicks: Long,
+    val trexDefaultDuration: Long
+)
+
+internal fun presentationMs(ticks: Long, h: LegHeader): Long = (ticks - h.editStartTicks) * 1000L / h.timescale
+
+/**
+ * One encoder's output as the assembler sees it: a header, then fragments in
+ * order, then an end (finished, or failed with a reason).
+ *
+ * Fragments queue up here between the producer (which reads the file or pipe)
+ * and the assembler (which consumes them); [coveredEndTicks] keeps counting
+ * past what has already been consumed, because the assembler needs to know how
+ * far the leg has got, not how much of it is still waiting.
+ */
+internal class FragmentLeg(val kind: Kind, val label: String, val path: File, val isPipe: Boolean) {
+    enum class Kind { VIDEO, AUDIO }
+
+    private val lock = Any()
+    private val queue = java.util.ArrayDeque<LegFragment>()
+    private var queuedTicks = 0L
+
+    @Volatile
+    var header: LegHeader? = null
+        private set
+
+    /** The encode ended successfully and every fragment it wrote has been queued. */
+    @Volatile
+    var finished = false
+        internal set
+
+    /** Why the leg is unusable; null while it is healthy or finished. */
+    @Volatile
+    var failure: String? = null
+        internal set
+
+    @Volatile
+    var coveredEndTicks = 0L
+        private set
+
+    @Volatile
+    var fragmentsReceived = 0
+        private set
+
+    /** Bytes the producer has taken from the encoder's output so far (pipe legs; file legs report the file's length). */
+    @Volatile
+    var bytesReceived = 0L
+        internal set
+
+    @Volatile
+    var job: Job? = null
+
+    /** Re-times this leg's fragments from the writer's own sample timestamps; set before the leg starts, for a writer (Media3's) whose durations drift. */
+    @Volatile
+    var timeCorrector: FragmentTimeCorrector? = null
+
+    /** Where the next fragment starts when its moof carries no tfdt: the end of the last one received, corrected. */
+    @Volatile
+    var nextStartTicks = 0L
+        private set
+
+    val failed: Boolean get() = failure != null
+
+    internal fun acceptHeader(h: LegHeader) {
+        header = h
+        Log.d(ASSEMBLER_TAG, "$label: moov read -- track ${h.trackId} '${h.handler}', timescale ${h.timescale}, " +
+            "presentation starts at media tick ${h.editStartTicks}")
+    }
+
+    internal fun offer(received: LegFragment) {
+        val f = timeCorrector?.correct(received, header) ?: received
+        synchronized(lock) { queue.addLast(f); queuedTicks += f.durationTicks }
+        coveredEndTicks = f.endTicks
+        nextStartTicks = f.endTicks
+        if (fragmentsReceived == 0) {
+            Log.d(ASSEMBLER_TAG, "$label: first fragment -- ${f.sampleCount} samples, ${f.durationTicks} ticks, " +
+                "starts at tick ${f.startTicks}, ${f.byteEnd - f.byteStart} bytes")
+        }
+        fragmentsReceived++
+    }
+
+    fun peek(): LegFragment? = synchronized(lock) { queue.peekFirst() }
+
+    fun pop() { synchronized(lock) { queue.pollFirst()?.let { queuedTicks -= it.durationTicks } } }
+
+    /** Media time, in ms, currently queued and not yet consumed. */
+    fun queuedMs(): Long {
+        val h = header ?: return 0L
+        return synchronized(lock) { queuedTicks } * 1000L / h.timescale
+    }
+
+    /** Presentation time, in ms, at the end of the last fragment received; 0 until there is one. */
+    fun coveredEndMs(): Long {
+        val h = header ?: return 0L
+        if (fragmentsReceived == 0) return 0L
+        return presentationMs(coveredEndTicks, h)
+    }
+
+    /** Bytes the encoder has produced so far, whichever way they travel. */
+    fun outputBytes(): Long = maxOf(bytesReceived, if (isPipe || !path.exists()) 0L else path.length())
+
+    fun cancel() { job?.cancel() }
+}
+
+// ---------------------------------------------------------------------------
+// Re-timing a video leg whose writer lets the timeline drift
+// ---------------------------------------------------------------------------
+
+/**
+ * The presentation timestamp (us) of every sample the video writer was
+ * handed, in the order it was handed them. Filled by [TimingMuxer] on the
+ * writer's thread, read by [FragmentTimeCorrector] on the leg's.
+ */
+internal class SampleTimes {
+    private var data = LongArray(1 shl 14)
+
+    @Volatile
+    var size = 0
+        private set
+
+    @Synchronized
+    fun add(us: Long) {
+        if (size == data.size) data = data.copyOf(data.size * 2)
+        data[size] = us
+        size += 1
+    }
+
+    @Synchronized
+    operator fun get(i: Int): Long = data[i]
+}
+
+/**
+ * Puts a video leg back on the timeline its own samples describe.
+ *
+ * Media3's fragmented muxer writes no `tfdt`, so where a fragment starts is
+ * implied by the durations of everything before it -- and it cannot know the
+ * duration of a fragment's LAST sample (the next one is not in the fragment),
+ * so it gives it the duration of the sample before. With timestamps that are
+ * whole milliseconds (an MKV at 30 fps alternates 33 and 34 ms) the guess is
+ * wrong by a millisecond at nearly every fragment boundary, and since each
+ * fragment starts where the last one claimed to end, the error accumulates:
+ * 675 ms over a 45-minute film, about 0.9 s an hour, video running late
+ * against an audio leg that is exact.
+ *
+ * What the muxer was handed is exact, though, and [SampleTimes] kept it. For
+ * every fragment but the last, the first sample of the NEXT fragment has
+ * reached the muxer by the time this one is written (that is what makes the
+ * writer cut it), so the true start of the next fragment is known. This sets
+ * the last sample's duration to whatever puts that start exactly on its
+ * timestamp, which leaves the cumulative timeline on the source's own frame
+ * times however many fragments there are. The rest of the fragment is left as
+ * the muxer wrote it.
+ *
+ * It trusts nothing it cannot confirm. The writer's guess for a fragment's
+ * last sample is the duration of the one before it, which the timestamp log
+ * can predict; if they disagree the log and the fragments are not the same
+ * samples (or the stream has B-frames, whose durations are computed differently),
+ * and the correction switches itself off for the rest of the leg, with the
+ * reason in the log, rather than rewrite durations it cannot vouch for.
+ */
+internal class FragmentTimeCorrector(private val times: SampleTimes, private val label: String) {
+    private var nextSample = 0
+    private var cumulativeTicks = 0L
+    private var disabledBecause: String? = null
+    private var examined = 0
+    private var corrected = 0
+    private var adjustedTicks = 0L
+    private var timescale = 0
+
+    fun correct(f: LegFragment, h: LegHeader?): LegFragment {
+        val next = nextSample + f.sampleCount // index, in the log, of the following fragment's first sample
+        nextSample = next
+        examined++
+        val uncorrectedEnd = cumulativeTicks + f.durationTicks
+        if (h == null || disabledBecause != null || f.lastSampleDuration < 0L || f.sampleCount < 2) {
+            cumulativeTicks = uncorrectedEnd
+            return f
+        }
+        timescale = h.timescale
+        // The final fragment: nothing follows it, so there is nothing to measure it against.
+        if (times.size <= next) {
+            cumulativeTicks = uncorrectedEnd
+            return f
+        }
+        val scale = h.timescale
+        val tLast = times[next - 1]
+        val tPrev = times[next - 2]
+        val tNext = times[next]
+        val guess = ticksOf(tLast, scale) - ticksOf(tPrev, scale)
+        val why: String? = when {
+            Math.abs(guess - f.lastSampleDuration) > 2L ->
+                "fragment $examined's last sample lasts ${f.lastSampleDuration} ticks but the timestamp log says its predecessor did $guess"
+            tNext <= tLast -> "timestamps do not increase at fragment $examined"
+            else -> null
+        }
+        if (why != null) return stop(why, f, uncorrectedEnd)
+        val target = ticksOf(tNext, scale) - ticksOf(times[0], scale)
+        val others = f.durationTicks - f.lastSampleDuration
+        val newLast = target - cumulativeTicks - others
+        if (newLast <= 0L || Math.abs(newLast - f.lastSampleDuration) > 5L * scale) {
+            return stop("fragment $examined would need a last sample of $newLast ticks (written as ${f.lastSampleDuration})", f, uncorrectedEnd)
+        }
+        cumulativeTicks = target
+        corrected++
+        adjustedTicks += newLast - f.lastSampleDuration
+        return LegFragment(
+            f.startTicks, others + newLast, f.sampleCount, f.moofSize, f.byteStart, f.byteEnd, f.data,
+            lastSampleDuration = f.lastSampleDuration, lastDurationOverride = newLast
+        )
+    }
+
+    private fun stop(why: String, f: LegFragment, uncorrectedEnd: Long): LegFragment {
+        disabledBecause = why
+        cumulativeTicks = uncorrectedEnd
+        Log.w(ASSEMBLER_TAG, "$label: video timeline correction switched OFF -- $why. Fragments from here on keep the writer's own durations, so the leg will drift.")
+        return f
+    }
+
+    private fun ticksOf(us: Long, scale: Int): Long = Math.floorDiv(us * scale + 500_000L, 1_000_000L)
+
+    fun summary(): String {
+        val off = disabledBecause
+        val ms = if (timescale > 0) adjustedTicks * 1000L / timescale else 0L
+        return when {
+            off != null -> "timeline correction OFF after $corrected of $examined fragments ($off)"
+            corrected == 0 && examined > 1 -> "timeline correction idle: none of $examined fragments could be measured (no sample timestamps recorded?)"
+            else -> "timeline re-timed from the sample timestamps: $corrected of $examined fragments adjusted, ${ms}ms in all"
+        }
+    }
+}
+
+/**
+ * Hands every sample straight on to [inner] -- and notes the timestamp of each
+ * one the writer will keep, on its way past, for [FragmentTimeCorrector].
+ * What the writer ignores (an empty sample, or video before the first key
+ * frame) is not noted either, so the log and the fragments hold the same samples.
+ * With a [throttle], each video sample is also held back until it is due, which
+ * is how a file export is capped to a multiple of realtime.
+ */
+@OptIn(UnstableApi::class)
+internal class TimingMuxer(
+    private val inner: Muxer,
+    private val times: SampleTimes,
+    private val throttle: ExportThrottle? = null
+) : Muxer {
+    private var videoTrackId = -1
+    private var sawKeyFrame = false
+
+    override fun addTrack(format: Format): Int {
+        val id = inner.addTrack(format)
+        if (MimeTypes.isVideo(format.sampleMimeType)) videoTrackId = id
+        return id
+    }
+
+    override fun writeSampleData(trackId: Int, byteBuffer: ByteBuffer, bufferInfo: BufferInfo) {
+        if (trackId == videoTrackId && bufferInfo.size > 0 && byteBuffer.remaining() > 0) {
+            if (bufferInfo.flags and C.BUFFER_FLAG_KEY_FRAME != 0) sawKeyFrame = true
+            if (sawKeyFrame) times.add(bufferInfo.presentationTimeUs)
+            // Blocks the thread the Transformer drains its encoder on, on purpose:
+            // see ExportThrottle.
+            throttle?.pace(bufferInfo.presentationTimeUs)
+        }
+        inner.writeSampleData(trackId, byteBuffer, bufferInfo)
+    }
+
+    override fun addMetadataEntry(metadataEntry: Metadata.Entry) = inner.addMetadataEntry(metadataEntry)
+
+    override fun close() = inner.close()
+}
+
+@OptIn(UnstableApi::class)
+internal class TimingMuxerFactory(
+    private val inner: Muxer.Factory,
+    private val times: SampleTimes,
+    private val throttle: ExportThrottle? = null
+) : Muxer.Factory by inner {
+    override fun create(path: String): Muxer = TimingMuxer(inner.create(path), times, throttle)
+    override fun supportsWritingNegativeTimestampsInEditList(): Boolean = inner.supportsWritingNegativeTimestampsInEditList()
+}
+
+/**
+ * Holds a Transformer export to at most [maxSpeed] seconds of media per second
+ * of wall clock, by making [TimingMuxer] wait before it writes any video sample
+ * that is ahead of schedule.
+ *
+ * Waiting in the muxer is a legitimate way to set a pace, not a hack: it stops
+ * the encoder's output being drained, which fills the encoder's input, which
+ * blocks the GL thread, then the decoder, then the reader -- the chain a full
+ * pipe sets off on a streaming leg (hence the muxer-delay watchdog being
+ * disabled for the export). So the wait happens on the thread Transformer
+ * drains its encoder on, and is meant to.
+ *
+ * Not a smoothing filter. The schedule is anchored at the first sample, but
+ * credit is capped at [MAX_BURST_NANOS]: an export that ran slow for a while
+ * (or just resumed after a stall) may catch up by about a second, never by
+ * minutes -- otherwise the cap would be spent as a burst, and bursts are
+ * exactly the load it is there to remove.
+ *
+ * Called from one thread only (the muxer's); [sleptMs] is safe to read from any.
+ */
+internal class ExportThrottle(val maxSpeed: Double) {
+    init { require(maxSpeed > 0.0) { "maxSpeed must be positive, was $maxSpeed" } }
+
+    private var firstPtsUs = Long.MIN_VALUE
+    private var highestPtsUs = Long.MIN_VALUE
+    private var anchorNanos = 0L
+    private var firstNanos = 0L
+
+    @Volatile private var lastNanos = 0L
+    @Volatile private var pacedMediaUs = 0L
+    @Volatile private var sleptNanos = 0L
+
+    /** Total time spent waiting so far. */
+    val sleptMs: Long get() = sleptNanos / 1_000_000
+
+    /** Waits, if need be, until the sample presented at [ptsUs] is due.
+     *  Each moment of media is paced once, the first time the writer gets past
+     *  it: a sample at or behind the highest timestamp seen (a reordering
+     *  encoder's) costs nothing. */
+    fun pace(ptsUs: Long) {
+        val now = System.nanoTime()
+        if (firstPtsUs == Long.MIN_VALUE) {
+            firstPtsUs = ptsUs
+            highestPtsUs = ptsUs
+            anchorNanos = now
+            firstNanos = now
+        } else if (ptsUs > highestPtsUs) {
+            highestPtsUs = ptsUs
+            pacedMediaUs = ptsUs - firstPtsUs
+            val dueNanos = anchorNanos + (pacedMediaUs * 1000.0 / maxSpeed).toLong()
+            val behindNanos = now - dueNanos
+            if (behindNanos > MAX_BURST_NANOS) {
+                // Slower than the cap for a while: forget the credit beyond the allowance.
+                anchorNanos += behindNanos - MAX_BURST_NANOS
+            } else if (-behindNanos >= MIN_WAIT_NANOS) {
+                val deadline = now + min(-behindNanos, MAX_WAIT_NANOS)
+                var remaining = deadline - System.nanoTime()
+                // parkNanos returns at once on an interrupted thread and leaves the flag
+                // set, so a cancelled export is neither held up nor has its interrupt eaten.
+                while (remaining > 0L && !Thread.currentThread().isInterrupted) {
+                    LockSupport.parkNanos(remaining)
+                    remaining = deadline - System.nanoTime()
+                }
+                sleptNanos += System.nanoTime() - now
+            }
+        }
+        lastNanos = System.nanoTime()
+    }
+
+    /** What the pacing did, for the log once the export is over. */
+    fun summary(): String {
+        val wallS = (lastNanos - firstNanos) / 1e9
+        val mediaS = pacedMediaUs / 1e6
+        val speed = if (wallS > 0.0) mediaS / wallS else 0.0
+        return "cap ${maxSpeed}x; ${"%.0f".format(Locale.US, mediaS)}s of media in ${"%.0f".format(Locale.US, wallS)}s of wall clock " +
+            "(${"%.1f".format(Locale.US, speed)}x), ${sleptMs / 1000}s of it spent waiting"
+    }
+
+    private companion object {
+        /** How far behind schedule the export may fall and still catch up. */
+        const val MAX_BURST_NANOS = 1_000_000_000L
+        /** Not worth a context switch: a sample this close to due goes straight through. */
+        const val MIN_WAIT_NANOS = 2_000_000L
+        /** One wait never exceeds this, whatever the clock says. */
+        const val MAX_WAIT_NANOS = 1_000_000_000L
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing: moov -> LegHeader, moof -> fragment facts
+// ---------------------------------------------------------------------------
+
+internal fun parseLegHeader(ftyp: ByteArray?, moov: ByteArray): LegHeader? {
+    val moovHdr = if (moov.u32(0) == 1L) 16 else 8
+    val kids = moov.boxes(moovHdr, moov.size)
+    val mvhd = kids.firstOrNull { it.type == "mvhd" } ?: return null
+    val trak = kids.firstOrNull { it.type == "trak" } ?: return null
+    val trakKids = moov.boxes(trak.payload, trak.end)
+    val tkhd = trakKids.firstOrNull { it.type == "tkhd" } ?: return null
+    val tkhdVersion = moov.u8(tkhd.payload)
+    val idOffset = tkhd.payload + 4 + (if (tkhdVersion == 1) 16 else 8)
+    if (idOffset + 4 > tkhd.end) return null
+    val trackId = moov.i32(idOffset)
+
+    val mdia = trakKids.firstOrNull { it.type == "mdia" } ?: return null
+    val mdiaKids = moov.boxes(mdia.payload, mdia.end)
+    val mdhd = mdiaKids.firstOrNull { it.type == "mdhd" } ?: return null
+    val mdhdVersion = moov.u8(mdhd.payload)
+    val timescale = moov.i32(mdhd.payload + 4 + (if (mdhdVersion == 1) 16 else 8))
+    if (timescale <= 0) return null
+    val hdlr = mdiaKids.firstOrNull { it.type == "hdlr" } ?: return null
+    val handler = moov.fourcc(hdlr.payload + 8)
+
+    // First real edit: an empty edit (media_time -1) only delays the start, it does not skip media.
+    var editStart = 0L
+    trakKids.firstOrNull { it.type == "edts" }?.let { edts ->
+        moov.boxes(edts.payload, edts.end).firstOrNull { it.type == "elst" }?.let { elst ->
+            val version = moov.u8(elst.payload)
+            val count = moov.u32(elst.payload + 4).toInt()
+            var p = elst.payload + 8
+            for (i in 0 until count) {
+                val mediaTime: Long
+                if (version == 1) {
+                    if (p + 20 > elst.end) break
+                    mediaTime = moov.u64(p + 8); p += 20
+                } else {
+                    if (p + 12 > elst.end) break
+                    mediaTime = moov.i32(p + 4).toLong(); p += 12
+                }
+                if (mediaTime >= 0) { editStart = mediaTime; break }
+            }
+        }
+    }
+
+    val mvex = kids.firstOrNull { it.type == "mvex" } ?: return null
+    val trex = moov.boxes(mvex.payload, mvex.end)
+        .filter { it.type == "trex" && it.end - it.start >= 32 }
+        .let { all -> all.firstOrNull { moov.i32(it.payload + 4) == trackId } ?: all.firstOrNull() } ?: return null
+
+    return LegHeader(
+        ftyp = ftyp,
+        mvhd = moov.copyOfRange(mvhd.start, mvhd.end),
+        trak = moov.copyOfRange(trak.start, trak.end),
+        trex = moov.copyOfRange(trex.start, trex.end),
+        trackId = trackId,
+        trackIdOffsetInTrak = idOffset - trak.start,
+        timescale = timescale,
+        handler = handler,
+        editStartTicks = editStart,
+        trexDefaultDuration = moov.u32(trex.payload + 12)
+    )
+}
+
+/** Where the fields the assembler reads or rewrites sit inside one moof, plus what the fragment contains. */
+internal class MoofLayout(
+    val sequenceOffset: Int,
+    val trackIdOffset: Int,
+    val trackId: Int,
+    /** -1 when tfhd carries no absolute base_data_offset (the usual default-base-is-moof case). */
+    val baseDataOffsetOffset: Int,
+    val baseDecodeTime: Long?,
+    val durationTicks: Long,
+    val sampleCount: Int,
+    /** The last sample's duration as written, and where in the moof that field is; -1 when the trun has no per-sample durations. */
+    val lastSampleDuration: Long,
+    val lastSampleDurationOffset: Int
+)
+
+/** [problem], when given, receives the reason a moof could not be understood. */
+internal fun parseMoof(moof: ByteArray, trexDefaultDuration: Long, problem: StringBuilder? = null): MoofLayout? {
+    fun bad(why: String): MoofLayout? { problem?.append(why); return null }
+    val moofHdr = if (moof.u32(0) == 1L) 16 else 8
+    val kids = moof.boxes(moofHdr, moof.size)
+    val mfhd = kids.firstOrNull { it.type == "mfhd" } ?: return bad("no mfhd")
+    val trafs = kids.filter { it.type == "traf" }
+    // One track per leg means one traf per moof. A writer that packs several would need the
+    // base offsets of the later ones reasoned about; not worth supporting, but never mis-read.
+    if (trafs.size != 1) return bad("${trafs.size} trafs (children: ${kids.joinToString { it.type }})")
+    val traf = trafs[0]
+    val tkids = moof.boxes(traf.payload, traf.end)
+    val tfhd = tkids.firstOrNull { it.type == "tfhd" } ?: return bad("no tfhd (traf children: ${tkids.joinToString { it.type }})")
+
+    val tfFlags = (moof.u32(tfhd.payload) and 0xFFFFFFL).toInt()
+    val trackId = moof.i32(tfhd.payload + 4)
+    var o = tfhd.payload + 8
+    var baseOffset = -1
+    if (tfFlags and 0x1 != 0) { baseOffset = o; o += 8 }
+    if (tfFlags and 0x2 != 0) o += 4
+    var defaultDuration: Long? = null
+    if (tfFlags and 0x8 != 0) { defaultDuration = moof.u32(o); o += 4 }
+
+    val baseTime: Long? = tkids.firstOrNull { it.type == "tfdt" }?.let { tfdt ->
+        if (moof.u8(tfdt.payload) == 1) moof.u64(tfdt.payload + 4) else moof.u32(tfdt.payload + 4)
+    }
+
+    var duration = 0L
+    var samples = 0
+    var lastDuration = -1L
+    var lastDurationOffset = -1
+    for (trun in tkids.filter { it.type == "trun" }) {
+        val flags = (moof.u32(trun.payload) and 0xFFFFFFL).toInt()
+        val count = moof.u32(trun.payload + 4).toInt()
+        var p = trun.payload + 8
+        if (flags and 0x1 != 0) p += 4
+        if (flags and 0x4 != 0) p += 4
+        val perSample = 4 * Integer.bitCount(flags and 0xF00)
+        if (p.toLong() + count.toLong() * perSample > trun.end) return bad("trun with $count samples overruns its box")
+        if (flags and 0x100 != 0) {
+            for (i in 0 until count) duration += moof.u32(p + i * perSample)
+            if (count > 0) {
+                lastDurationOffset = p + (count - 1) * perSample // the duration is the first field of a sample entry
+                lastDuration = moof.u32(lastDurationOffset)
+            }
+        } else {
+            duration += count.toLong() * (defaultDuration ?: trexDefaultDuration)
+            if (count > 0) { lastDurationOffset = -1; lastDuration = -1L }
+        }
+        samples += count
+    }
+    return MoofLayout(mfhd.payload + 4, tfhd.payload + 4, trackId, baseOffset, baseTime, duration, samples, lastDuration, lastDurationOffset)
+}
+
+// ---------------------------------------------------------------------------
+// Getting fragments out of a leg: tailing a file, or reading a pipe
+// ---------------------------------------------------------------------------
+
+/**
+ * Walks a leg's FILE as it grows and indexes every *complete* moof+mdat pair.
+ * A fragment counts only once its mdat is entirely on disk, so a read never
+ * sees half a fragment; the encoder's writes are append-only, which is what
+ * lets a byte range, once indexed, be trusted forever.
+ */
+internal class LegIndexer(private val file: File) {
+    private var scanned = 0L
+    private var ftyp: ByteArray? = null
+    var error: String? = null
+        private set
+
+    /** Hands whatever became complete since the last call to [leg]; true when something was added. */
+    fun scan(leg: FragmentLeg): Boolean {
+        if (error != null || !file.exists()) return false
+        val length = file.length()
+        if (length <= scanned) return false
+        var changed = false
+        try {
+            RandomAccessFile(file, "r").use { raf ->
+                val hdr = ByteArray(16)
+                var pos = scanned
+                scan@ while (pos + 8 <= length) {
+                    raf.seek(pos)
+                    raf.readFully(hdr, 0, 8)
+                    var size = hdr.u32(0)
+                    val type = hdr.fourcc(4)
+                    var hdrSize = 8
+                    if (size == 1L) {
+                        if (pos + 16 > length) break
+                        raf.readFully(hdr, 8, 8)
+                        size = hdr.u64(8); hdrSize = 16
+                    } else if (size == 0L) {
+                        break // "to end of file": cannot be judged complete while the file is growing
+                    }
+                    if (size < hdrSize) { error = "malformed box '$type' (size $size) at $pos"; break }
+                    if (pos + size > length) break // still being written
+                    when (type) {
+                        "ftyp" -> if (size <= MAX_HEADER_BOX_BYTES) ftyp = readBytes(raf, pos, size.toInt())
+                        "moov" -> {
+                            if (size > MAX_HEADER_BOX_BYTES) { error = "moov of $size bytes"; break@scan }
+                            val parsed = parseLegHeader(ftyp, readBytes(raf, pos, size.toInt()))
+                            if (parsed == null) { error = "unreadable moov at $pos"; break@scan }
+                            leg.acceptHeader(parsed)
+                            changed = true
+                        }
+                        "moof" -> {
+                            val next = pos + size
+                            if (next + 8 > length) break@scan
+                            raf.seek(next)
+                            raf.readFully(hdr, 0, 8)
+                            var mSize = hdr.u32(0)
+                            val mType = hdr.fourcc(4)
+                            var mHdr = 8
+                            if (mSize == 1L) {
+                                if (next + 16 > length) break@scan
+                                raf.readFully(hdr, 8, 8)
+                                mSize = hdr.u64(8); mHdr = 16
+                            }
+                            if (mType != "mdat") { error = "moof at $pos is followed by '$mType', not mdat"; break@scan }
+                            if (mSize < mHdr) { error = "malformed mdat at $next"; break@scan }
+                            if (next + mSize > length) break@scan // fragment's data not fully written yet
+                            val h = leg.header
+                            if (h == null) { error = "fragment at $pos precedes the moov"; break@scan }
+                            if (size > MAX_MOOF_BYTES) { error = "moof of $size bytes"; break@scan }
+                            val problem = StringBuilder()
+                            val layout = parseMoof(readBytes(raf, pos, size.toInt()), h.trexDefaultDuration, problem)
+                            if (layout == null) { error = "unsupported moof layout at $pos ($problem)"; break@scan }
+                            val start = layout.baseDecodeTime ?: leg.nextStartTicks
+                            leg.offer(LegFragment(start, layout.durationTicks, layout.sampleCount, size.toInt(), pos, next + mSize, null, layout.lastSampleDuration))
+                            changed = true
+                            pos = next + mSize
+                            continue@scan
+                        }
+                        // mfra, free, skip, sidx, styp ...: nothing the merge needs.
+                    }
+                    pos += size
+                }
+                scanned = pos
+            }
+        } catch (e: IOException) {
+            error = "reading ${file.name} failed: ${e.message}"
+        }
+        return changed
+    }
+
+    private fun readBytes(raf: RandomAccessFile, pos: Long, n: Int): ByteArray {
+        val out = ByteArray(n)
+        raf.seek(pos)
+        raf.readFully(out)
+        return out
+    }
+}
+
+/**
+ * Cuts a fragmented mp4 BYTE STREAM -- arriving in whatever sized pieces a
+ * pipe hands over -- into the same things [LegIndexer] finds in a file: the
+ * header, then whole fragments. Each fragment is returned with its own bytes,
+ * since nothing is left on disk to point at.
+ */
+internal class FragmentStreamParser(private val leg: FragmentLeg) {
+    var error: String? = null
+        private set
+
+    private var ftyp: ByteArray? = null
+    private var streamPos = 0L
+    private val head = ByteArray(16)
+    private var headLen = 0
+    private var cur: ByteArray? = null
+    private var curType = ""
+    private var curFilled = 0
+    private var curMoofSize = 0
+    private var curFragmentStart = 0L
+    private var skipLeft = 0L
+    private var pendingMoof: ByteArray? = null
+    private var pendingMoofPos = 0L
+
+    fun feed(buf: ByteArray, offset: Int, length: Int) {
+        var off = offset
+        var left = length
+        while (left > 0 && error == null) {
+            if (skipLeft > 0) {
+                val n = minOf(skipLeft, left.toLong()).toInt()
+                skipLeft -= n; off += n; left -= n; streamPos += n
+                continue
+            }
+            val box = cur
+            if (box == null) {
+                // A box header: 8 bytes, or 16 when the size field says a 64-bit size follows.
+                val want = if (headLen >= 4 && head.u32(0) == 1L) 16 else 8
+                val n = minOf(want - headLen, left)
+                System.arraycopy(buf, off, head, headLen, n)
+                headLen += n; off += n; left -= n; streamPos += n
+                val wantNow = if (headLen >= 4 && head.u32(0) == 1L) 16 else 8
+                if (headLen < wantNow) continue
+                beginBox(wantNow)
+                headLen = 0
+            } else {
+                val n = minOf(box.size - curFilled, left)
+                System.arraycopy(buf, off, box, curFilled, n)
+                curFilled += n; off += n; left -= n; streamPos += n
+                if (curFilled == box.size) { val t = curType; cur = null; completeBox(t, box) }
+            }
+        }
+    }
+
+    private fun beginBox(hdrSize: Int) {
+        var size = head.u32(0)
+        val type = head.fourcc(4)
+        if (size == 1L) size = head.u64(8)
+        if (size == 0L) { error = "box '$type' runs to the end of the stream"; return }
+        if (size < hdrSize) { error = "malformed box '$type' (size $size)"; return }
+        val boxStart = streamPos - hdrSize
+        when (type) {
+            "ftyp", "moov", "moof" -> {
+                val cap = if (type == "moof") MAX_MOOF_BYTES else MAX_HEADER_BOX_BYTES
+                if (size > cap) { error = "$type of $size bytes"; return }
+                val arr = ByteArray(size.toInt())
+                System.arraycopy(head, 0, arr, 0, hdrSize)
+                cur = arr; curType = type; curFilled = hdrSize
+                if (type == "moof") pendingMoofPos = boxStart
+            }
+            "mdat" -> {
+                val m = pendingMoof
+                if (m == null) { skipLeft = size - hdrSize; return } // an mdat nobody described is not ours to forward
+                if (m.size + size > MAX_FRAGMENT_BYTES) { error = "fragment of ${m.size + size} bytes"; return }
+                val arr = ByteArray((m.size + size).toInt())
+                System.arraycopy(m, 0, arr, 0, m.size)
+                System.arraycopy(head, 0, arr, m.size, hdrSize)
+                cur = arr; curType = "mdat"; curFilled = m.size + hdrSize
+                curMoofSize = m.size; curFragmentStart = pendingMoofPos
+                pendingMoof = null
+            }
+            else -> skipLeft = size - hdrSize // mfra, free, skip, sidx ...
+        }
+    }
+
+    private fun completeBox(type: String, box: ByteArray) {
+        when (type) {
+            "ftyp" -> ftyp = box
+            "moov" -> {
+                val h = parseLegHeader(ftyp, box)
+                if (h == null) { error = "unreadable moov"; return }
+                leg.acceptHeader(h)
+            }
+            "moof" -> pendingMoof = box
+            "mdat" -> {
+                val h = leg.header
+                if (h == null) { error = "fragment before the moov"; return }
+                val problem = StringBuilder()
+                val layout = parseMoof(box.copyOfRange(0, curMoofSize), h.trexDefaultDuration, problem)
+                if (layout == null) { error = "unsupported moof layout ($problem)"; return }
+                val start = layout.baseDecodeTime ?: leg.nextStartTicks
+                leg.offer(LegFragment(start, layout.durationTicks, layout.sampleCount, curMoofSize,
+                    curFragmentStart, curFragmentStart + box.size, box, layout.lastSampleDuration))
+            }
+        }
+    }
+}
+
+private interface LegSource {
+    /** How long an idle source waits before looking again. */
+    val pollMs: Long
+    /** Moves whatever the encoder has produced since the last call into the leg; true when it did something. */
+    fun pull(): Boolean
+    /** True while the source is deliberately not reading because the leg has enough queued. */
+    fun holdingBack(): Boolean
+    /** Something that only grows while the encoder is working, for the stall watchdog. */
+    fun growth(): Long
+    val error: String?
+    fun close()
+}
+
+private class FileTailSource(private val leg: FragmentLeg) : LegSource {
+    private val indexer = LegIndexer(leg.path)
+    override val pollMs = LEG_POLL_MS
+    override fun pull(): Boolean = indexer.scan(leg)
+    override fun holdingBack(): Boolean = false
+    override fun growth(): Long = if (leg.path.exists()) leg.path.length() else 0L
+    override val error: String? get() = indexer.error
+    override fun close() {}
+}
+
+/**
+ * Reads a FIFO the encoder is writing to. The FIFO is opened read-WRITE: that
+ * never blocks (a plain read-only open waits for a writer, and an encoder that
+ * dies before opening its output would leave this waiting for ever), and since
+ * this side then holds a writer itself, the pipe never reports end-of-file.
+ * The end is decided by the caller instead -- the encode has finished AND
+ * nothing is left to read -- which is sound because everything an encoder
+ * writes is in the pipe before it exits.
+ */
+private class PipeSource(private val leg: FragmentLeg, private val maxLeadMs: Long) : LegSource {
+    private val raf = RandomAccessFile(leg.path, "rw")
+    private val input = FileInputStream(raf.fd)
+    private val parser = FragmentStreamParser(leg)
+    private val buffer = ByteArray(256 * 1024)
+    private var ioError: String? = null
+    override val pollMs = PIPE_POLL_MS
+
+    override fun pull(): Boolean {
+        var any = false
+        // Read while there is room. Not reading is the whole backpressure mechanism.
+        while (leg.queuedMs() < maxLeadMs && parser.error == null && ioError == null) {
+            val available = try { input.available() } catch (e: IOException) { ioError = "pipe unreadable: ${e.message}"; break }
+            if (available <= 0) break
+            val n = try { input.read(buffer, 0, minOf(available, buffer.size)) } catch (e: IOException) { ioError = "pipe unreadable: ${e.message}"; break }
+            if (n <= 0) break
+            leg.bytesReceived += n
+            parser.feed(buffer, 0, n)
+            any = true
+        }
+        return any
+    }
+
+    override fun holdingBack(): Boolean = leg.queuedMs() >= maxLeadMs
+    override fun growth(): Long = leg.bytesReceived
+    override val error: String? get() = parser.error ?: ioError
+    override fun close() { try { raf.close() } catch (_: IOException) {} }
+}
+
+/**
+ * Runs [encode] (which writes [leg]'s file or pipe) and moves what it writes
+ * into the leg as it appears.
+ *
+ * The encode's own success is not enough to call the leg good. It also has to
+ * have written a readable fragment stream, and -- when [expectedMs] is given --
+ * one that actually reaches (within [toleranceMs]) the end of what was asked
+ * for. A leg that ends early without error is the failure mode that cost the
+ * old whole-file encode its last frames, so it is judged here, by the leg's
+ * own fragment count, rather than discovered later in the output.
+ *
+ * [stallAbortMs], when set, kills an encode whose output has not grown for
+ * that long (time spent deliberately not reading a full pipe does not count).
+ * A fragmented writer grows in whole fragments, about one GOP, so this must be
+ * sized well above a GOP of encode time. It exists because without per-chunk
+ * budgets a wedged encoder would otherwise only be stopped by the budget for
+ * the whole film.
+ *
+ * For a pipe leg, [maxLeadMs] is how much encoded media may sit queued before
+ * the reader stops reading and the encoder is made to wait.
+ */
+internal fun CoroutineScope.launchLeg(
+    leg: FragmentLeg,
+    maxLeadMs: Long,
+    stallAbortMs: Long?,
+    expectedMs: Long?,
+    toleranceMs: Long,
+    encode: suspend () -> Boolean
+): Job {
+    val job = launch(Dispatchers.IO) {
+        // The source is opened BEFORE the encoder starts: a pipe must have its reader in place
+        // when the encoder opens its end of it.
+        val source: LegSource = try {
+            if (leg.isPipe) PipeSource(leg, maxLeadMs) else FileTailSource(leg)
+        } catch (e: Exception) {
+            Log.e(ASSEMBLER_TAG, "${leg.label}: could not open ${leg.path.name}: ${e.message}")
+            leg.failure = "could not open its output: ${e.message}"
+            return@launch
+        }
+        val encoding = async {
+            try { encode() } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                Log.e(ASSEMBLER_TAG, "${leg.label}: encode threw ${e.javaClass.simpleName}: ${e.message}", e); false
+            }
+        }
+        var lastGrowth = -1L
+        var lastGrowthAt = System.currentTimeMillis()
+        var stalled = false
+        try {
+            while (true) {
+                val done = encoding.isCompleted // sampled BEFORE the pull so the last pull sees everything
+                val progressed = source.pull()
+                val now = System.currentTimeMillis()
+                val growth = source.growth()
+                if (growth != lastGrowth || source.holdingBack()) { lastGrowth = growth; lastGrowthAt = now }
+                if (done && !progressed && !source.holdingBack()) break
+                if (stallAbortMs != null && now - lastGrowthAt >= stallAbortMs) {
+                    Log.e(ASSEMBLER_TAG, "${leg.label}: no growth for ${now - lastGrowthAt}ms -- aborting the encode")
+                    stalled = true
+                    encoding.cancel()
+                    break
+                }
+                if (!progressed) delay(source.pollMs)
+            }
+            val encodeOk = !stalled && encoding.await()
+            val h = leg.header
+            val verdict: String? = when {
+                stalled -> "stalled"
+                !encodeOk -> "the encode reported failure"
+                source.error != null -> "unreadable output: ${source.error}"
+                h == null || leg.fragmentsReceived == 0 -> "no fragments were produced"
+                expectedMs != null && leg.coveredEndMs() + toleranceMs < expectedMs ->
+                    "truncated: covers ${leg.coveredEndMs()}ms of the expected ${expectedMs}ms"
+                else -> null
+            }
+            if (verdict == null) {
+                Log.d(ASSEMBLER_TAG, "${leg.label}: complete -- ${leg.fragmentsReceived} fragments, ${leg.coveredEndMs()}ms" +
+                    (leg.timeCorrector?.let { "; ${it.summary()}" } ?: ""))
+                leg.finished = true
+            } else {
+                Log.e(ASSEMBLER_TAG, "${leg.label}: FAILED -- $verdict")
+                leg.failure = verdict
+            }
+        } catch (e: CancellationException) {
+            if (!leg.finished && leg.failure == null) leg.failure = "cancelled"
+            throw e
+        } finally {
+            encoding.cancel()
+            source.close()
+        }
+    }
+    leg.job = job
+    return job
+}
+
+// ---------------------------------------------------------------------------
+// Merging
+// ---------------------------------------------------------------------------
+
+internal class MergedHeader(val bytes: ByteArray, val videoTrackId: Int, val audioTrackId: Int?)
+
+/**
+ * ftyp + one moov that declares the video track and (when there is one) the
+ * audio track, followed by nothing: every fragment follows separately.
+ *
+ * Both legs number their track 1, so the audio's id is moved when it collides;
+ * the track boxes themselves (codec configuration, edit list, timescale) are
+ * the legs' own bytes. mvex keeps only the trex entries -- a leg's mehd would
+ * claim the duration of one track as the duration of the file.
+ */
+internal fun buildMergedHeader(v: LegHeader, a: LegHeader?): MergedHeader {
+    val ftyp = v.ftyp ?: mp4Box(
+        "ftyp",
+        "isom".toByteArray(Charsets.ISO_8859_1), byteArrayOf(0, 0, 2, 0),
+        "isomiso6mp41".toByteArray(Charsets.ISO_8859_1)
+    )
+    val audioId = if (a == null) null else if (a.trackId == v.trackId) v.trackId + 1 else a.trackId
+    val mvhd = v.mvhd.copyOf()
+    mvhd.put32(mvhd.size - 4, maxOf(v.trackId, audioId ?: 0) + 1) // next_track_ID is mvhd's last field in both versions
+    val parts = ArrayList<ByteArray>()
+    parts += mvhd
+    parts += v.trak
+    val trexes = ArrayList<ByteArray>()
+    trexes += v.trex
+    if (a != null && audioId != null) {
+        val trak = a.trak.copyOf()
+        trak.put32(a.trackIdOffsetInTrak, audioId)
+        val trex = a.trex.copyOf()
+        trex.put32(12, audioId)
+        parts += trak
+        trexes += trex
+    }
+    parts += mp4Box("mvex", *trexes.toTypedArray())
+    val moov = mp4Box("moov", *parts.toTypedArray())
+    return MergedHeader(ftyp + moov, v.trackId, audioId)
+}
+
+internal class AssemblyResult(
+    val ok: Boolean,
+    val bytesWritten: Long,
+    val fragmentsWritten: Int,
+    val videoEndMs: Long,
+    val audioEndMs: Long?,
+    /** Presentation time of the first video fragment minus that of the first audio fragment (priming excluded); null without audio. */
+    val startOffsetMs: Long?,
+    val reason: String?
+)
+
+/**
+ * Merges a video leg and an audio leg into one fragmented mp4 on [sink] as the
+ * two encoders produce them.
+ *
+ * Nothing is written for [startupWaitMs] of wall-clock time, so the encoders
+ * get a head start and the first portion is a real run of media rather than a
+ * fragment or two (the wait ends early if the legs finish or fail first). After
+ * that, each pass takes every complete fragment that both legs have covered so
+ * far -- the "horizon" is the earlier of the two legs' coverage -- and writes
+ * them in presentation order, then waits for the next. Because a portion never
+ * runs past what *both* legs have, the two tracks advance together, and because
+ * fragments are whole and in order, a viewer or a later remux sees one
+ * continuous stream.
+ *
+ * A leg that fails caps the horizon at its own end, so what was written is a
+ * clean, in-sync prefix; the caller decides what to do with a prefix.
+ *
+ * Writing to [sink] may block (a renderer reading slowly). That is intended:
+ * it stops the assembler consuming, the legs' queues fill, and for pipe legs
+ * the encoders are held back in turn.
+ */
+internal class FragmentAssembler(
+    private val video: FragmentLeg,
+    private val audio: FragmentLeg?,
+    private val label: String,
+    private val startupWaitMs: Long
+) {
+    suspend fun run(sink: OutputStream): AssemblyResult = withContext(Dispatchers.IO) {
+        val startedAt = System.nanoTime()
+        var videoWritten = 0
+        var audioWritten = 0
+        var sequence = 1
+        var bytes = 0L
+        var merged: MergedHeader? = null
+        var headerWritten = false
+        var lastLogAt = startedAt
+        var firstVideoStartMs: Long? = null
+        var firstAudioStartMs: Long? = null
+        val readers = HashMap<FragmentLeg, RandomAccessFile>()
+        val copyBuffer = ByteArray(64 * 1024)
+
+        fun write(b: ByteArray, off: Int, len: Int) { sink.write(b, off, len); bytes += len }
+
+        fun patch(moof: ByteArray, layout: MoofLayout, newTrackId: Int, relocation: Long, lastDurationOverride: Long) {
+            moof.put32(layout.sequenceOffset, sequence++)
+            if (lastDurationOverride >= 0L && layout.lastSampleDurationOffset >= 0) {
+                moof.put32(layout.lastSampleDurationOffset, lastDurationOverride.toInt())
+            }
+            if (layout.trackId != newTrackId) moof.put32(layout.trackIdOffset, newTrackId)
+            if (layout.baseDataOffsetOffset >= 0) {
+                // An absolute base follows the bytes to their new position.
+                moof.put64(layout.baseDataOffsetOffset, moof.u64(layout.baseDataOffsetOffset) + relocation)
+            }
+        }
+
+        fun writeFragment(leg: FragmentLeg, h: LegHeader, f: LegFragment, newTrackId: Int) {
+            val data = f.data
+            if (data != null) {
+                val layout = parseMoof(data.copyOfRange(0, f.moofSize), h.trexDefaultDuration)
+                    ?: throw IllegalStateException("${leg.label}: a queued fragment stopped parsing")
+                patch(data, layout, newTrackId, bytes - f.byteStart, f.lastDurationOverride)
+                write(data, 0, data.size)
+                return
+            }
+            val raf = readers.getOrPut(leg) { RandomAccessFile(leg.path, "r") }
+            val moof = ByteArray(f.moofSize)
+            raf.seek(f.byteStart)
+            raf.readFully(moof)
+            val layout = parseMoof(moof, h.trexDefaultDuration)
+                ?: throw IllegalStateException("${leg.label}: fragment at ${f.byteStart} stopped parsing")
+            patch(moof, layout, newTrackId, bytes - f.byteStart, f.lastDurationOverride)
+            write(moof, 0, moof.size)
+            raf.seek(f.byteStart + f.moofSize)
+            var left = f.byteEnd - (f.byteStart + f.moofSize)
+            while (left > 0) {
+                val n = raf.read(copyBuffer, 0, minOf(copyBuffer.size.toLong(), left).toInt())
+                if (n < 0) throw IllegalStateException("${leg.label}: fragment at ${f.byteStart} is shorter on disk than indexed")
+                write(copyBuffer, 0, n)
+                left -= n
+            }
+        }
+
+        fun result(ok: Boolean, reason: String?): AssemblyResult {
+            val offset = if (firstVideoStartMs != null && firstAudioStartMs != null) firstVideoStartMs!! - firstAudioStartMs!!.coerceAtLeast(0L) else null
+            return AssemblyResult(
+                ok = ok, bytesWritten = bytes, fragmentsWritten = videoWritten + audioWritten,
+                videoEndMs = video.coveredEndMs(), audioEndMs = audio?.coveredEndMs(),
+                startOffsetMs = offset, reason = reason
+            )
+        }
+
+        try {
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                // Flags first, fragments after: a leg sets `finished` only once everything is queued.
+                val videoFinished = video.finished
+                val audioFinished = audio?.finished ?: true
+                val allFinished = videoFinished && audioFinished
+                val anyFailed = video.failed || audio?.failed == true
+                val waited = (System.nanoTime() - startedAt) / 1_000_000L >= startupWaitMs
+
+                if (waited || allFinished || anyFailed) {
+                    val vh = video.header
+                    val ah = audio?.header
+                    if (merged == null && vh != null && (audio == null || ah != null)) merged = buildMergedHeader(vh, ah)
+                    val hdr = merged
+                    if (hdr != null && vh != null) {
+                        // A leg that is still running caps the horizon at what it has; a failed one at what it
+                        // got to; a finished one not at all.
+                        var horizon = Long.MAX_VALUE
+                        if (!videoFinished) horizon = minOf(horizon, video.coveredEndMs())
+                        if (audio != null && !audioFinished) horizon = minOf(horizon, audio.coveredEndMs())
+
+                        var wrote = false
+                        while (true) {
+                            val vf = video.peek()?.takeIf { presentationMs(it.endTicks, vh) <= horizon }
+                            val af = if (audio != null && ah != null) audio.peek()?.takeIf { presentationMs(it.endTicks, ah) <= horizon } else null
+                            if (vf == null && af == null) break
+                            val takeVideo = when {
+                                vf == null -> false
+                                af == null -> true
+                                else -> presentationMs(vf.startTicks, vh) <= presentationMs(af.startTicks, ah!!)
+                            }
+                            if (!headerWritten) {
+                                write(hdr.bytes, 0, hdr.bytes.size)
+                                headerWritten = true
+                            }
+                            if (takeVideo) {
+                                if (firstVideoStartMs == null) firstVideoStartMs = presentationMs(vf!!.startTicks, vh)
+                                writeFragment(video, vh, vf!!, hdr.videoTrackId)
+                                video.pop(); videoWritten++
+                            } else {
+                                if (firstAudioStartMs == null) firstAudioStartMs = presentationMs(af!!.startTicks, ah!!)
+                                writeFragment(audio!!, ah!!, af!!, hdr.audioTrackId!!)
+                                audio.pop(); audioWritten++
+                            }
+                            wrote = true
+                        }
+                        if (wrote) sink.flush()
+                    }
+                }
+
+                val nowNs = System.nanoTime()
+                if (headerWritten && (nowNs - lastLogAt) / 1_000_000L >= 10_000L) {
+                    lastLogAt = nowNs
+                    Log.d(ASSEMBLER_TAG, "$label: assembled ${videoWritten + audioWritten} fragments (video $videoWritten, " +
+                        "audio $audioWritten), ${bytes / 1024} KiB; queued video ${video.queuedMs()}ms, audio ${audio?.queuedMs() ?: 0}ms")
+                }
+
+                if (anyFailed) {
+                    val why = listOfNotNull(video.failure?.let { "video: $it" }, audio?.failure?.let { "audio: $it" }).joinToString("; ")
+                    return@withContext result(false, why)
+                }
+                if (allFinished && video.peek() == null && audio?.peek() == null) {
+                    if (!headerWritten) return@withContext result(false, "nothing to write")
+                    sink.flush()
+                    return@withContext result(true, null)
+                }
+                delay(PIPE_POLL_MS)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            error("unreachable")
+        } finally {
+            readers.values.forEach { try { it.close() } catch (_: IOException) {} }
+        }
+    }
 }
