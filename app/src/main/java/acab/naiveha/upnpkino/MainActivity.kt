@@ -2,14 +2,14 @@ package acab.naiveha.upnpkino
 
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import android.util.TypedValue
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
@@ -22,12 +22,10 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import acab.naiveha.upnpkino.databinding.ActivityMainBinding
 import android.util.Log
+import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import androidx.core.net.toUri
-import androidx.documentfile.provider.DocumentFile
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -36,45 +34,26 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var preferences: Preferences
     private lateinit var startingAnimation: ValueAnimator
-    private val requestMultiplePermissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-        Log.d(TAG, "Permission results: $permissions")
-        val deniedPermissions = permissions.filter { !it.value }.keys
-        val isPartialAccessGranted = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            val fromCallback = permissions["android.permission.READ_MEDIA_VISUAL_USER_SELECTED"] == true
-            val fromCheck = ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == PackageManager.PERMISSION_GRANTED
-            Log.d(TAG, "Partial access check: fromCallback=$fromCallback, fromCheck=$fromCheck")
-            fromCallback || fromCheck
-        } else {
-            false
+    private val startPermissionsLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+        Log.d(TAG, "Start permission results: $permissions")
+        if (!StartPreconditions.hasLocalNetworkPermission(this)) {
+            reportLocalNetworkDenied()
+            abortStart()
+            return@registerForActivityResult
         }
-        val realDenials = deniedPermissions.filter {
-            val isBroadMedia = it == "android.permission.READ_MEDIA_IMAGES" || it == "android.permission.READ_MEDIA_VIDEO"
-            if (isPartialAccessGranted && isBroadMedia) {
-                Log.d(TAG, "Filtering out broad media denial because partial access is granted: $it")
-                false
-            } else {
-                true
-            }
+        if (!hasNotificationPermission()) {
+            Toast.makeText(this, R.string.warning_notifications_denied, Toast.LENGTH_LONG).show()
         }
-        if (realDenials.isNotEmpty()) {
-            Toast.makeText(this, getString(R.string.permissions_required, realDenials.toString()), Toast.LENGTH_LONG).show()
-            Log.d(TAG, "Real denials reported to user: $realDenials")
-        } else {
-            Log.d(TAG, "No real denials to report.")
-        }
+        startServiceIfReady()
     }
     private val selectLocalMovieFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         uri?.let {
-            val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            contentResolver.takePersistableUriPermission(it, takeFlags)
-            preferences.saveLocalMovieFolderUri(it)
+            if (persistFolderGrant(it)) preferences.saveLocalMovieFolderUri(it)
         }
     }
     private val selectLocalMusicFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         uri?.let {
-            val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            contentResolver.takePersistableUriPermission(it, takeFlags)
-            preferences.saveLocalMusicFolderUri(it)
+            if (persistFolderGrant(it)) preferences.saveLocalMusicFolderUri(it)
         }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,34 +79,11 @@ class MainActivity : AppCompatActivity() {
                 binding.imageView.setColorFilter(animator.animatedValue as Int)
             }
         }
-        val requiredPermissions = mutableListOf<String>()
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            requiredPermissions.add("android.permission.POST_NOTIFICATIONS")
-            requiredPermissions.add("android.permission.READ_MEDIA_IMAGES")
-            requiredPermissions.add("android.permission.READ_MEDIA_VIDEO")
-            requiredPermissions.add("android.permission.READ_MEDIA_AUDIO")
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                requiredPermissions.add("android.permission.READ_MEDIA_VISUAL_USER_SELECTED")
-            }
-        } else {
-            requiredPermissions.add("android.permission.READ_EXTERNAL_STORAGE")
-        }
-        if (android.os.Build.VERSION.SDK_INT >= 37) {
-            requiredPermissions.add("android.permission.ACCESS_LOCAL_NETWORK")
-        }
-        val missingPermissions = requiredPermissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }.toTypedArray()
-        if (missingPermissions.isNotEmpty()) {
-            requestMultiplePermissionsLauncher.launch(missingPermissions)
-        }
         binding.button.setOnClickListener { toggleService() }
         binding.button2.setOnClickListener {
-            preferences.clearLocalMovieFolderUri()
             selectLocalMovieFolderLauncher.launch(null)
         }
         binding.button2Label.setOnClickListener {
-            preferences.clearLocalMovieFolderUri()
             selectLocalMovieFolderLauncher.launch(null)
         }
         binding.button2.setOnLongClickListener {
@@ -143,11 +99,9 @@ class MainActivity : AppCompatActivity() {
             true
         }
         binding.button3.setOnClickListener {
-            preferences.clearLocalMusicFolderUri()
             selectLocalMusicFolderLauncher.launch(null)
         }
         binding.button3Label.setOnClickListener {
-            preferences.clearLocalMusicFolderUri()
             selectLocalMusicFolderLauncher.launch(null)
         }
         binding.button3.setOnLongClickListener {
@@ -274,7 +228,12 @@ class MainActivity : AppCompatActivity() {
         val url = "https://github.com/naive-HA/UpnpKino"
         val intent = Intent(Intent.ACTION_VIEW)
         intent.data = url.toUri()
-        startActivity(intent)
+        try {
+            startActivity(intent)
+        } catch (e: ActivityNotFoundException) {
+            // no browser: show the address instead of crashing
+            Toast.makeText(this, url, Toast.LENGTH_LONG).show()
+        }
     }
     private fun copyBtcAddressToClipboard() {
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
@@ -286,6 +245,10 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
     }
+    override fun onDestroy() {
+        if (::startingAnimation.isInitialized) startingAnimation.cancel()
+        super.onDestroy()
+    }
     private fun toggleService() {
         binding.button.isEnabled = false
         disableButtons()
@@ -295,84 +258,77 @@ class MainActivity : AppCompatActivity() {
             return
         }
         // else
-        //if service is not running, try and start it
-        try {
-            val connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
-            
-            @Suppress("DEPRECATION")
-            val wifiNetwork = connectivityManager.allNetworks.find { network ->
-                val capabilities = connectivityManager.getNetworkCapabilities(network)
-                val linkProperties = connectivityManager.getLinkProperties(network)
-                val networkInterface = linkProperties?.let { NetworkInterface.getByName(it.interfaceName) }
-                
-                capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
-                networkInterface?.supportsMulticast() == true &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
-            }
-
-            if (wifiNetwork == null) {
-                throw Exception("Error: No Wi-Fi or Hotspot network detected")
-            }
-
-            val linkProperties = connectivityManager.getLinkProperties(wifiNetwork)
-            val address = linkProperties?.linkAddresses?.find { it.address is Inet4Address }?.address
-            if (address == null) {
-                throw Exception("Error: Could not get IP address")
-            }
-
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                if (ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
-                    throw Exception("Error: Notification permission not granted")
-                }
-            }
-            if (android.os.Build.VERSION.SDK_INT >= 37 && ContextCompat.checkSelfPermission(this, "android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED) {
-                throw Exception("Error: Local network permission not granted")
-            }
-
-            val hasVisualPermission = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                val hasImages = ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_IMAGES") == PackageManager.PERMISSION_GRANTED
-                val hasVideo = ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_VIDEO") == PackageManager.PERMISSION_GRANTED
-                val hasPartial = ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == PackageManager.PERMISSION_GRANTED
-                Log.d(TAG, "toggleService visual check: hasImages=$hasImages, hasVideo=$hasVideo, hasPartial=$hasPartial")
-                hasImages || hasVideo || hasPartial
-            } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_IMAGES") == PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_VIDEO") == PackageManager.PERMISSION_GRANTED
-            } else {
-                ContextCompat.checkSelfPermission(this, "android.permission.READ_EXTERNAL_STORAGE") == PackageManager.PERMISSION_GRANTED
-            }
-
-            if (!hasVisualPermission) {
-                throw Exception("Error: Photo/Video storage permission not granted")
-            }
-
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                if (ContextCompat.checkSelfPermission(this, "android.permission.READ_MEDIA_AUDIO") != PackageManager.PERMISSION_GRANTED) {
-                    throw Exception("Error: Audio storage permission not granted")
-                }
-            }
-            if (preferences.getLocalMovieFolderUri() == null && preferences.getLocalMusicFolderUri() == null) {
-                throw Exception("Error: No folder selected")
-            }
-            if (preferences.getLocalMovieFolderUri() != null && DocumentFile.fromTreeUri(this, preferences.getLocalMovieFolderUri()!!)?.exists() != true) {
-                throw Exception("Error: Local movies folder does not exist")
-            }
-            if (preferences.getLocalMusicFolderUri() != null && DocumentFile.fromTreeUri(this, preferences.getLocalMusicFolderUri()!!)?.exists() != true) {
-                throw Exception("Error: Local music folder does not exist")
-            }
-
-            if (startService(Intent(this, UpnpService::class.java).apply {
-                putExtra("ip_address", address.hostAddress)
-            }) == null) {
-                updateButtonState(false)
-            }
-        } catch (e: Exception) {
-            binding.button.isEnabled = true
-            enableButtons()
-            Constants.vibrate(this)
-            Toast.makeText(this, e.message, Toast.LENGTH_LONG).show()
+        //if service is not running, ask for whatever start still needs, then try and start it
+        val missing = missingStartPermissions()
+        if (missing.isNotEmpty()) {
+            startPermissionsLauncher.launch(missing)
             return
         }
+        startServiceIfReady()
+    }
+    private fun startServiceIfReady() {
+        try {
+            when (val outcome = StartPreconditions.check(this, preferences)) {
+                is StartPreconditions.Outcome.Blocked -> {
+                    abortStart()
+                    Toast.makeText(this, outcome.message, Toast.LENGTH_LONG).show()
+                }
+                is StartPreconditions.Outcome.Ready -> {
+                    if (startService(Intent(this, UpnpService::class.java).apply {putExtra("ip_address", outcome.ipAddress)}) == null) {
+                        updateButtonState(false)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            abortStart()
+            Toast.makeText(this, e.message ?: e.toString(), Toast.LENGTH_LONG).show()
+        }
+    }
+    private fun abortStart() {
+        binding.button.isEnabled = true
+        enableButtons()
+        Constants.vibrate(this)
+    }
+    private fun hasNotificationPermission(): Boolean =
+        android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(this, "android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED
+    private fun missingStartPermissions(): Array<String> {
+        val missing = mutableListOf<String>()
+        if (!hasNotificationPermission()) missing.add("android.permission.POST_NOTIFICATIONS")
+        if (!StartPreconditions.hasLocalNetworkPermission(this)) missing.add(StartPreconditions.LOCAL_NETWORK_PERMISSION)
+        return missing.toTypedArray()
+    }
+    private fun reportLocalNetworkDenied() {
+        if (shouldShowRequestPermissionRationale(StartPreconditions.LOCAL_NETWORK_PERMISSION)) {
+            Toast.makeText(this, R.string.error_local_network_permission, Toast.LENGTH_LONG).show()
+        } else {
+            Snackbar.make(binding.root, R.string.error_local_network_permission_settings, Snackbar.LENGTH_LONG)
+                .setAction(R.string.action_open_settings) { openAppSettings() }
+                .show()
+        }
+    }
+    private fun openAppSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, R.string.error_local_network_permission_settings, Toast.LENGTH_LONG).show()
+        }
+    }
+    private fun persistFolderGrant(uri: Uri): Boolean {
+        val attempts = intArrayOf(
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION
+        )
+        for (flags in attempts) {
+            try {
+                contentResolver.takePersistableUriPermission(uri, flags)
+                return true
+            } catch (e: Exception) {
+                Log.w(TAG, "takePersistableUriPermission(flags=$flags) refused for $uri: ${e.message}")
+            }
+        }
+        Toast.makeText(this, R.string.error_folder_grant_failed, Toast.LENGTH_LONG).show()
+        return false
     }
     private fun disableButtons(){
         binding.button2.isEnabled = false

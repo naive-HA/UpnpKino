@@ -1,18 +1,15 @@
 package acab.naiveha.upnpkino
 
 import android.content.Intent
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import android.widget.Toast
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import java.net.Inet4Address
-import java.net.NetworkInterface
 
 class UpnpTileService : TileService() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
@@ -59,41 +56,21 @@ class UpnpTileService : TileService() {
         if (UpnpRepository.kinoService.isRunning.value) {
             stopService(Intent(this, UpnpService::class.java))
             Constants.vibrate(this)
+        } else if (UpnpRepository.kinoService.isStarting.value) {
+            return
         } else {
             try {
-                val connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
-                @Suppress("DEPRECATION")
-                val wifiNetwork = connectivityManager.allNetworks.find { network ->
-                    val capabilities = connectivityManager.getNetworkCapabilities(network)
-                    val linkProperties = connectivityManager.getLinkProperties(network)
-                    val networkInterface = linkProperties?.let { NetworkInterface.getByName(it.interfaceName) }
-                    
-                    capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true &&
-                    networkInterface?.supportsMulticast() == true &&
-                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+                when (val outcome = StartPreconditions.check(this, Preferences(this))) {
+                    is StartPreconditions.Outcome.Blocked -> {
+                        Constants.vibrate(this)
+                        Toast.makeText(this, outcome.message, Toast.LENGTH_LONG).show()
+                    }
+                    is StartPreconditions.Outcome.Ready -> {
+                        startService(Intent(this, UpnpService::class.java).apply {
+                            putExtra("ip_address", outcome.ipAddress)
+                        })
+                    }
                 }
-
-                if (wifiNetwork == null) {
-                    Constants.vibrate(this)
-                    return
-                }
-
-                val linkProperties = connectivityManager.getLinkProperties(wifiNetwork)
-                val address = linkProperties?.linkAddresses?.find { it.address is Inet4Address }?.address
-                if (address == null) {
-                    Constants.vibrate(this)
-                    return
-                }
-
-                val preferences = Preferences(this)
-                if (preferences.getLocalMovieFolderUri() == null && preferences.getLocalMusicFolderUri() == null) {
-                    Constants.vibrate(this)
-                    return
-                }
-
-                startService(Intent(this, UpnpService::class.java).apply {
-                    putExtra("ip_address", address.hostAddress)
-                })
             } catch (e: Exception) {
                 Constants.vibrate(this)
             }

@@ -22,6 +22,7 @@
             android:orientation="horizontal"
             android:weightSum="3"
             android:padding="2dp"
+            android:visibility="invisible"
             app:layout_constraintBottom_toBottomOf="@+id/menu_icon"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"

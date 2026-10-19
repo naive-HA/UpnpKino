@@ -23,6 +23,7 @@ import kotlin.text.contains
 
 class DlnaController(val context: Context, val upnpService: UpnpService) {
     companion object {
+        private const val TAG = "DlnaController"
         private const val SUBSCRIPTION_POLL_MS = 1_000L
         private const val SUBSCRIPTION_TIMEOUT = 3_600
         private const val PLAYING_PROGRESS_POLL_MS = 1_000L
@@ -35,6 +36,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(HTTP_TIMEOUT, TimeUnit.SECONDS)
         .readTimeout(HTTP_TIMEOUT, TimeUnit.SECONDS)
+        .socketFactory(BoundSocketFactory { upnpService.configuration.getInetAddress() })
         .build()
     @Volatile private var pollingJob: Job? = null
     @Volatile private var subscriptionJob: Job? = null
@@ -62,13 +64,13 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         }
         scope.launch {
             repo.selectedDeviceId.collect { deviceId ->
-                Log.d("DlnaController", "Selected device changed: $deviceId")
+                Log.d(TAG, "Selected device changed: $deviceId")
                 if (deviceId == null) {
                     resetDlnaActivity()
                 } else {
                     val devices = repo.devices.value
                     val device = deviceId.let { devices?.get(it) } ?: run {
-                        Log.e("DlnaController", "No device selected")
+                        Log.e(TAG, "No device selected")
                         repo.setSelectedDeviceId(null)
                         return@collect
                     }
@@ -88,13 +90,13 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                         val playbackProfile = determineBestPlaybackProfile(mediaFile = mediaFile, device = selectedDevice)
                         when (resolvePlaybackCapability(mediaFile = mediaFile, device = selectedDevice, playbackProfile = playbackProfile)) {
                             PlaybackCapability.NATIVE -> {
-                                Log.d("DlnaController", "Media file '${mediaFile.name}' can be played natively (Profile: $playbackProfile).")
+                                Log.d(TAG, "Media file '${mediaFile.name}' can be played natively (Profile: $playbackProfile).")
                             }
                             PlaybackCapability.TRANSCODE -> {
-                                Log.d("DlnaController", "Media file '${mediaFile.name}' needs transcoding (Profile: $playbackProfile).")
+                                Log.d(TAG, "Media file '${mediaFile.name}' needs transcoding (Profile: $playbackProfile).")
                             }
                             PlaybackCapability.UNSUPPORTED -> {
-                                Log.d("DlnaController", "Media file '${mediaFile.name}' cannot be played (unsupported).")
+                                Log.d(TAG, "Media file '${mediaFile.name}' cannot be played (unsupported).")
                                 repo.setSelectedMediaFileId(null)
                                 return@collect
                             }
@@ -108,16 +110,16 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         scope.launch {
             repo.streamingFlag.collect { streamingFlag ->
                 if (streamingFlag != null) {
-                    Log.d("DlnaController", "Streaming command received: $streamingFlag")
+                    Log.d(TAG, "Streaming command received: $streamingFlag")
                     val deviceId = repo.selectedDeviceId.value
                     val devices = repo.devices.value
                     val device = deviceId?.let { devices?.get(it) } ?: run {
-                        Log.e("DlnaController", "No device selected for command $streamingFlag")
+                        Log.e(TAG, "No device selected for command $streamingFlag")
                         return@collect
                     }
                     val fileId = repo.selectedMediaFileId.value
                     if (fileId?.let { device.mediaCollection[it] } !is MediaCollection.MediaNode.Item) {
-                        Log.e("DlnaController", "Invalid media item for command $streamingFlag")
+                        Log.e(TAG, "Invalid media item for command $streamingFlag")
                         return@collect
                     }
                     val streamingFeedbackFlag = repo.streamingFeedbackFlag.value
@@ -153,7 +155,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                         }
                         Action.SEEK -> {
                             val target = repo.seekBarTarget.value
-                            Log.d("DlnaController", "Seeking to target: $target")
+                            Log.d(TAG, "Seeking to target: $target")
                             if (target != null && sendMediaCommand(Action.SEEK, mapOf("Target" to target)) != null) {
                                 return@collect
                             } //else ERROR
@@ -163,7 +165,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                             resetDlnaActivity()
                         }
                         else -> {
-                            Log.e("DlnaController", "Error executing streaming command: $streamingFlag")
+                            Log.e(TAG, "Error executing streaming command: $streamingFlag")
                             repo.setStreamingFlag(Action.ERROR)
                             resetDlnaActivity()
                         }
@@ -176,7 +178,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                 val deviceId = repo.selectedDeviceId.value
                 val streamingFlag = repo.streamingFlag.value
                 if (deviceId != null && streamingFeedbackFlag != null && streamingFlag in listOf(Action.PLAY, Action.PAUSE, Action.SEEK)) {
-                    Log.d("DlnaController", "streamingFeedbackFlag set to: $streamingFeedbackFlag")
+                    Log.d(TAG, "streamingFeedbackFlag set to: $streamingFeedbackFlag")
                     when (streamingFeedbackFlag) {
                         ActionFeedback.STOPPED,
                         ActionFeedback.NO_MEDIA_PRESENT -> {
@@ -222,7 +224,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
     }
 
     private suspend fun subscribeToDeviceEvents(dlnaDevice: DlnaNodeModel) {
-        Log.d("DlnaController", "Subscribing to device events: ${dlnaDevice.friendlyName}")
+        Log.d(TAG, "Subscribing to device events: ${dlnaDevice.friendlyName}")
         subscriptionMutex.withLock {
             if (subscriptionJob?.isActive == true) {
                 return@withLock
@@ -264,7 +266,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
 
     private fun sendSubscribeRequest(device: DlnaNodeModel, url: String, callback: String, sid: String? = null): Pair<String, Int>? {
         val fullUrl = resolveUrl(device, url)
-        Log.d("DlnaController", "Sending SUBSCRIBE request to $fullUrl (sid=$sid)")
+        Log.d(TAG, "Sending SUBSCRIBE request to $fullUrl (sid=$sid)")
         return try {
             val builder = Request.Builder()
                 .url(fullUrl)
@@ -301,12 +303,12 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         val devices = repo.devices.value
         val device = deviceId?.let { devices?.get(it) }
         if (device == null) {
-            Log.w("DlnaController", "Cannot start polling: no device selected")
+            Log.w(TAG, "Cannot start polling: no device selected")
             return
         }
         pollingMutex.withLock {
             if (pollingJob?.isActive == true) return@withLock
-            Log.d("DlnaController", "Starting polling for ${device.friendlyName}")
+            Log.d(TAG, "Starting polling for ${device.friendlyName}")
             pollingJob = scope.launch {
                 try {
                     while (isActive) {
@@ -402,18 +404,18 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         val deviceId = repo.selectedDeviceId.value
         val devices = repo.devices.value
         val device = deviceId?.let { devices?.get(it) } ?: run {
-            Log.e("DlnaController", "sendMediaCommand: no device selected")
+            Log.e(TAG, "sendMediaCommand: no device selected")
             return null
         }
         val soapUrl = device.controlUrls[command.service] ?: run {
-            Log.e("DlnaController", "sendMediaCommand: service not supported by device")
+            Log.e(TAG, "sendMediaCommand: service not supported by device")
             return null
         }
-        Log.d("DlnaController", "Sending SOAP command: ${command.actionName} to ${device.friendlyName}")
+        Log.d(TAG, "Sending SOAP command: ${command.actionName} to ${device.friendlyName}")
         return try {
             val fullUrl = resolveUrl(device, soapUrl)
             val serviceUrn = device.serviceUrns[command.service] ?: run {
-                Log.e("DlnaController", "Service ${command.service} not supported by device")
+                Log.e(TAG, "Service ${command.service} not supported by device")
                 throw Exception("Service ${command.service} not supported by device")
             }
             val payload = upnpService.upnpMessages.draftDlnaMessage(command.actionName, serviceUrn, args, device.mediaCollection)
@@ -424,7 +426,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                 .build()
             client.newCall(request).execute().use { response ->
                 val responseBody = response.body.string()
-                Log.d("DlnaController", "SOAP command ${command.actionName} response: code=${response.code}")
+                Log.d(TAG, "SOAP command ${command.actionName} response: code=${response.code}")
                 if (response.isSuccessful && responseBody.isNotEmpty()) {
                     val expectedResponse = command.responseName
                     if (expectedResponse.isNotEmpty() && upnpService.upnpMessages.parseUpnpHttpRequest(responseBody) == expectedResponse
@@ -432,18 +434,18 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                         return responseBody
                     }
                 }
-                Log.w("DlnaController", "SOAP command ${command.actionName} failed: code=${response.code} body=$responseBody")
+                Log.w(TAG, "SOAP command ${command.actionName} failed: code=${response.code} body=$responseBody")
                 return null
             }
         } catch (e: Exception) {
-            Log.e("DlnaController", "Exception sending SOAP command: ${command.actionName}", e)
+            Log.e(TAG, "Exception sending SOAP command: ${command.actionName}", e)
             repo.setStreamingFlag(Action.ERROR)
             null
         }
     }
 
     fun handleMediaEvent(remoteAddr: String, payload: String) {
-        Log.d("DlnaController", "Received event from $remoteAddr")
+        Log.d(TAG, "Received event from $remoteAddr")
         when (repo.streamingFeedbackFlag.value) {
             ActionFeedback.STOPPED,
             ActionFeedback.DISCONNECTED,
@@ -487,12 +489,12 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         if (!repo.searchForDevices.value) return
         if (dlnaDevices.values.any { it.location == location }) return
         if (!pendingDevices.add(location)) return
-        Log.d("DlnaController", "Registering device at location: $location")
+        Log.d(TAG, "Registering device at location: $location")
         scope.launch {
             try {
                 val id = upnpService.configuration.generateRandomId(10, dlnaDevices.keys)
                 interrogateDevice(location)?.let { deviceDescription ->
-                    Log.i("DlnaController", "Discovered DLNA device: ${deviceDescription.friendlyName} at $location")
+                    Log.i(TAG, "Discovered DLNA device: ${deviceDescription.friendlyName} at $location")
                     if (dlnaDevices.values.none { it.location == location }) {
                         val device = DlnaNodeModel(
                             id,
@@ -505,12 +507,12 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                         )
                         val command = Action.GET_PROTOCOL_INFO
                         val controlUrl = device.controlUrls[command.service] ?: run {
-                            Log.e("DlnaController", "Service not supported by device")
+                            Log.e(TAG, "Service not supported by device")
                             repo.setSelectedDeviceId(null)
                             return@let
                         }
                         val serviceUrn = device.serviceUrns[command.service] ?: run {
-                            Log.e("DlnaController", "Service not supported by device")
+                            Log.e(TAG, "Service not supported by device")
                             repo.setSelectedDeviceId(null)
                             return@let
                         }
@@ -523,7 +525,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                             .build()
                         client.newCall(request).execute().use { response ->
                             val responseBody = response.body.string()
-                            Log.d("DlnaController", "SOAP command ${command.actionName} response: code=${response.code}")
+                            Log.d(TAG, "SOAP command ${command.actionName} response: code=${response.code}")
                             if (response.isSuccessful && responseBody.isNotEmpty()) {
                                 val expectedResponse = command.responseName
                                 if (expectedResponse.isNotEmpty() && upnpService.upnpMessages.parseUpnpHttpRequest(responseBody) == expectedResponse) {
@@ -533,13 +535,13 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                                         if (sinkData.isBlank()) {
                                             return@let
                                         }
-                                        Log.d("DlnaController", "raw sink data: $sinkData")
+                                        Log.d(TAG, "raw sink data: $sinkData")
                                         device.readSinkProfilesFromProtocolInfo(sinkData)
                                         dlnaDevices[id] = device
                                         withContext(Dispatchers.Main) {
                                             repo.setDevices(dlnaDevices.toMap())
                                         }
-                                        Log.d("DlnaController", "Registered $location")
+                                        Log.d(TAG, "Registered $location")
                                     }
                                 }
                             }
@@ -567,6 +569,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                 }
             }
         } catch (e: Exception) {
+            Log.e(TAG, "Error interrogating device: $e")
             null
         }
     }
@@ -606,7 +609,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
     }
 
     private fun stopPlaying(){
-        Log.d("DlnaController", "stopPlaying")
+        Log.d(TAG, "stopPlaying")
         val selectedDeviceId = repo.selectedDeviceId.value
         val dlnaDevicesMap = repo.devices.value
         val dlnaDevice = selectedDeviceId?.let { dlnaDevicesMap?.get(it) }
@@ -650,10 +653,10 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                        (profile.container == mediaFile.container)
 
         return if (isNative) {
-            Log.d("DlnaController", "'${mediaFile.name}' can be played natively on '${device.friendlyName}'")
+            Log.d(TAG, "'${mediaFile.name}' can be played natively on '${device.friendlyName}'")
             PlaybackCapability.NATIVE
         } else {
-            Log.d("DlnaController", "'${mediaFile.name}' needs transcoding on '${device.friendlyName}' (Profile: $profile)")
+            Log.d(TAG, "'${mediaFile.name}' needs transcoding on '${device.friendlyName}' (Profile: $profile)")
             PlaybackCapability.TRANSCODE
         }
     }
@@ -668,7 +671,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         val sourceAudioTrack = mediaFile.audioTracks.firstOrNull()
 
         if (sourceVideoTrack == null && sourceAudioTrack == null) {
-            Log.d("DlnaController", "media file '${mediaFile.name}' has no video or audio tracks")
+            Log.d(TAG, "media file '${mediaFile.name}' has no video or audio tracks")
             return null
         }
 

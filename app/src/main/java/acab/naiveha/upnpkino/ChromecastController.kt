@@ -56,6 +56,7 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
         val payload:       String,
     )
     private val repo = UpnpRepository.chromecast
+    private val boundSocketFactory = BoundSocketFactory { upnpService.configuration.getInetAddress() }
     @Volatile var isConnected: Boolean = false
 //        private set
     private val resourceLock = Any()
@@ -238,7 +239,9 @@ class ChromecastController(val context: Context, val upnpService: UpnpService) {
             try {
                 val sock = withContext(Dispatchers.IO) {
                     Log.v("ChromecastController", "Creating SSL socket")
-                    buildTrustAllSslContext().socketFactory.createSocket(device.host, device.port) as SSLSocket
+                    val plainSocket = boundSocketFactory.createAndBindSocket()
+                    plainSocket.connect(InetSocketAddress(device.host, device.port), 5000)
+                    buildTrustAllSslContext().socketFactory.createSocket(plainSocket, device.host.hostAddress, device.port, true) as SSLSocket
                 }
                 withContext(Dispatchers.IO) {
                     sock.enabledProtocols = sock.supportedProtocols.filter { it.startsWith("TLS") }.toTypedArray()
