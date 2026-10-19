@@ -196,8 +196,32 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
          *  replaces was sized for a file that grew continuously). Without
          *  per-chunk budgets this and [Budget.forVideo] are all that stop a hung
          *  encoder: the first within a minute and a half, the second only after
-         *  hours. Time a piped leg spends held back on purpose does not count. */
+         *  hours. Time a piped leg spends held back on purpose does not count.
+         *  Nor, on the hw_ffmpeg plan, does the copy of a source nobody has
+         *  mirrored yet, or a piped source being read through to a late start
+         *  ([resolveInputFor]): its encode reads the source through ffmpeg, and
+         *  both leave it silent without being stuck. */
         private const val VIDEO_LEG_STALL_ABORT_MS = 90_000L
+
+        /** The same for the audio leg: no growth in its output for this long and
+         *  its encode is killed as wedged. Without it the only bound on a hung
+         *  audio encode was [Budget.forAudio], which is sized to the whole range
+         *  (minutes for a film) -- and a hung audio leg holds the merge, and
+         *  through it everything the video leg encodes meanwhile, for all of it.
+         *
+         *  The figure is the video leg's, for a different reason. A fragment here
+         *  is 2s of audio, cut in about a tenth of a second on a Pixel 7, so
+         *  encode time is not what it has to clear. What can legitimately keep
+         *  the output from growing is the source: ffmpeg's start-up, a slow
+         *  content provider behind a pipe, an index-less container scanned to a
+         *  late start. Slow must not be mistaken for broken, so it stays generous.
+         *
+         *  The one silence too long for any fixed figure is a piped source being
+         *  read through to a late start offset (see [resolveFfmpegInputPath]);
+         *  that run is not watched at all ([resolveInputFor]), and neither is the
+         *  copy of a source nobody has mirrored yet. Time a piped OUTPUT leg
+         *  spends held back on purpose does not count. */
+        private const val AUDIO_LEG_STALL_ABORT_MS = 90_000L
 
         /** How long a Transformer export may go without growing before the
          *  threads it is made of are dumped to the log -- once per export, well
@@ -353,8 +377,8 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
          * doing 4K->1080p on the safe path runs well below that, so it blew the
          * budget every time, retried identically, and aborted -- a device being
          * slow was indistinguishable from a device being broken. These factors are
-         * deliberately generous for that reason; [VIDEO_LEG_STALL_ABORT_MS] is what
-         * distinguishes the two.
+         * deliberately generous for that reason; [VIDEO_LEG_STALL_ABORT_MS] and
+         * [AUDIO_LEG_STALL_ABORT_MS] are what distinguish the two.
          *
          * Self-contained by design: no reference to the outer constants, so the
          * numbers here can be tuned without reading the rest of the file.
@@ -393,7 +417,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
              *  than half real time" -- far below what any device manages, but
              *  generous enough that a long film on a loaded phone isn't killed
              *  for being slow. The cap is there for a wedged process, not a slow
-             *  one. */
+             *  one; [AUDIO_LEG_STALL_ABORT_MS] is what catches a hung one quickly. */
             fun forAudio(durationMs: Long): Long =
                 (durationMs / 2).coerceIn(MIN_AUDIO_BUDGET_MS, MAX_AUDIO_BUDGET_MS)
         }
@@ -2080,6 +2104,30 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         return ResolvedInput(path, if (path == "pipe:0") item.uri else null)
     }
 
+    /**
+     * [resolveFfmpegInputPath] on behalf of [leg], whose encode is about to read the result.
+     *
+     * Two things the leg's stall clock must not count, because to it they look like an encode
+     * that has stopped growing:
+     *  - this call. A source nobody has mirrored yet is copied to the cache by it (a stream is the
+     *    first to ask), which can take minutes for a large remux.
+     *  - a piped source with a late start. It is read through from byte 0 to [startMs] before the
+     *    first fragment exists, decoding all of it for video (see [resolveFfmpegInputPath]); for as
+     *    long as that takes the leg is silent, and no fixed figure tells it from a hang. That is the
+     *    expected trade-off of a low-space device, so such a leg stays unwatched.
+     *
+     * Done in the leg's own encode, not in [runLegsOnce] ahead of it: the merge's head-start clock
+     * starts when it runs, and holding that back by the copy would delay a stream's first byte by
+     * as much.
+     */
+    private suspend fun resolveInputFor(leg: FragmentLeg, item: MediaCollection.MediaNode.Item, startMs: Long): ResolvedInput {
+        leg.stallExempt = true
+        val input = resolveFfmpegInputPath(item)
+        leg.stallExempt = input.isPiped && startMs > 0L
+        if (leg.stallExempt) Log.d(TAG, "${leg.label}: piped source read through to ${startMs}ms -- not watched for stalls")
+        return input
+    }
+
     /** A real local path for [item] *if one already exists* -- a `file://`
      *  source, or a mirror some earlier call already paid for -- and null
      *  otherwise. For callers that want the cheap answer but must not trigger a
@@ -2308,6 +2356,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                 try {
                     launchLeg(videoLeg, STREAM_LEAD_MS, VIDEO_LEG_STALL_ABORT_MS, totalDurationMs, FINAL_CHUNK_TOLERANCE_MS) {
                         if (plan.videoStrategy == "hw_ffmpeg") {
+                            resolveInputFor(videoLeg, item, rangeStartMs) // the callee's own resolve is then instant
                             transcodeVideoLegViaHardwareFfmpeg(
                                 item, targetVideoCodec, resolution, videoBitrateKbps, videoLeg,
                                 startTimeMs = rangeStartMs, durationMs = limitMs,
@@ -2322,7 +2371,8 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
                         }
                     }
                     if (audioLeg != null) {
-                        launchLeg(audioLeg, STREAM_LEAD_MS, null, totalDurationMs, FINAL_CHUNK_TOLERANCE_MS) {
+                        launchLeg(audioLeg, STREAM_LEAD_MS, AUDIO_LEG_STALL_ABORT_MS, totalDurationMs, FINAL_CHUNK_TOLERANCE_MS) {
+                            resolveInputFor(audioLeg, item, rangeStartMs) // the callee's own resolve is then instant
                             transcodeAudioTrack(
                                 item, audioPath,
                                 durationS = limitMs?.let { it / 1000.0 },
@@ -2395,7 +2445,10 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         if (startTimeMs > 0) args.addAll(listOf("-ss", (startTimeMs / 1000.0).toString()))
         args.addAll(listOf("-i", input.path))
         args.addAll(listOf(
-            "-map", "0:v:0", "-an", "-vf", videoScaleFilter(outputBox, deinterlace = isInterlaced(sourceMetadata)), "-c:v", targetVideo.encoderId,
+            // -map_chapters -1: this leg is one track, and an ffmpeg mp4 gets a second (text) track for a
+            // source's chapters, whose samples ride in the first fragment -- two trafs in one moof, which
+            // the merge rejects (the audio leg met this first; see transcodeAudioTrack).
+            "-map", "0:v:0", "-map_chapters", "-1", "-an", "-vf", videoScaleFilter(outputBox, deinterlace = isInterlaced(sourceMetadata)), "-c:v", targetVideo.encoderId,
             "-b:v", "${videoBitrateKbps}k", "-bitrate_mode", "vbr",
             "-ndk_codec", "1" // applies to the encoder for -c:v, above -- not a duplicate of the flag before -i
         ))
@@ -3106,6 +3159,14 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      * does not depend on it -- a reader only ever uses complete fragments
      * whichever way the file grows -- it just stops the readable prefix
      * lagging the encode by an arbitrary amount.
+     *
+     * `-map_chapters -1` because the output must hold exactly ONE track: the
+     * merge copies one trak into its header and reads one traf per moof. Mapping
+     * a single audio stream does not make the file single-track -- ffmpeg copies
+     * the source's chapters into an mp4 by default, as a text track whose
+     * samples ride in the first fragment. A source with chapters therefore made
+     * that fragment carry two trafs, and the leg was rejected as unreadable
+     * even though the encode itself had succeeded.
      */
     private suspend fun transcodeAudioTrack(
         item: MediaCollection.MediaNode.Item,
@@ -3129,7 +3190,9 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         // minutes when it should take seconds.
         val args = mutableListOf(ffmpegPath, "-y", "-hide_banner")
         if (startTimeMs > 0) args.addAll(listOf("-ss", (startTimeMs / 1000.0).toString()))
-        args.addAll(listOf("-i", input.path, "-vn", "-sn", "-map", "0:a:$audioTrackIndex?", "-c:a", encoder, "-b:a", "${audioBitrateBps / 1000}k"))
+        // -map_chapters -1: see the doc above -- left alone, a source with chapters puts a second
+        // (text) track in this file and two trafs in its first moof.
+        args.addAll(listOf("-i", input.path, "-vn", "-sn", "-map", "0:a:$audioTrackIndex?", "-map_chapters", "-1", "-c:a", encoder, "-b:a", "${audioBitrateBps / 1000}k"))
         if (durationS != null) args.addAll(listOf("-t", durationS.toString()))
         args.addAll(channelArgs(resolveItemChannelLayout(item, audioTrackIndex)))
         args.addAll(listOf(
@@ -3141,6 +3204,9 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         // timeoutMs used to be a flat 300s regardless of what was being asked for
         // -- a 3-minute clip and a 3-hour film shared one budget. The caller
         // derives it from the work (Budget.forAudio of the whole range).
+        // Once per leg, so a run that fails on this leg's output can be read against the command that made it:
+        // a clean exit logs nothing else about the process.
+        Log.d(TAG, "transcodeAudioTrack: '${item.name}' -> ${outFile.name}: ${args.joinToString(" ")}")
         val result = runProcessCapture(args, timeoutMs = timeoutMs, stdinSource = input.stdinSource)
         return if (written != null) result.exitCode == 0 && written() > 0L else result.succeededWriting(outFile)
     }
@@ -3396,9 +3462,9 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
      *  [SAFE_PATH_MAX_FRAMES_IN_ENCODER]. Reflection, because the setter is
      *  experimental and the log has to say whether this Media3 has it. (A
      *  minified build would need a keep rule for it.) */
-    @OptIn(UnstableApi::class)
     private fun applyMaxFramesInEncoder(builder: Transformer.Builder) {
         val limit = SAFE_PATH_MAX_FRAMES_IN_ENCODER
+        if (limit <= 0) return
         try {
             builder.javaClass.getMethod("experimentalSetMaxFramesInEncoder", Int::class.javaPrimitiveType).invoke(builder, limit)
             Log.d(TAG, "Safe path: frames in the encoder limited to $limit (experimentalSetMaxFramesInEncoder)")
@@ -3409,6 +3475,7 @@ class TranscoderController(val context: Context, val upnpService: UpnpService) {
         }
     }
 
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
     private fun thermalStatusName(status: Int?): String = when (status) {
         PowerManager.THERMAL_STATUS_NONE -> "NONE"
         PowerManager.THERMAL_STATUS_LIGHT -> "LIGHT"
@@ -4293,6 +4360,12 @@ internal class FragmentLeg(val kind: Kind, val label: String, val path: File, va
     @Volatile
     var job: Job? = null
 
+    /** Set by the leg's own encode while it does something that legitimately produces no output, so
+     *  [launchLeg]'s stall clock is held for as long as it is set: copying a source nobody has mirrored
+     *  yet to the cache, or reading a piped source through to a late start offset. See [resolveInputFor]. */
+    @Volatile
+    var stallExempt = false
+
     /** Re-times this leg's fragments from the writer's own sample timestamps; set before the leg starts, for a writer (Media3's) whose durations drift. */
     @Volatile
     var timeCorrector: FragmentTimeCorrector? = null
@@ -4613,11 +4686,27 @@ internal class ExportThrottle(val maxSpeed: Double) {
 // Parsing: moov -> LegHeader, moof -> fragment facts
 // ---------------------------------------------------------------------------
 
-internal fun parseLegHeader(ftyp: ByteArray?, moov: ByteArray): LegHeader? {
+/** The handler type ("soun", "vide", "text" ...) of [trak]'s media, or "?" when it cannot be read. */
+private fun trakHandlerOf(moov: ByteArray, trak: BoxRef): String {
+    val mdia = moov.boxes(trak.payload, trak.end).firstOrNull { it.type == "mdia" } ?: return "?"
+    val hdlr = moov.boxes(mdia.payload, mdia.end).firstOrNull { it.type == "hdlr" } ?: return "?"
+    return if (hdlr.payload + 12 <= hdlr.end) moov.fourcc(hdlr.payload + 8) else "?"
+}
+
+/** [problem], when given, receives the reason a moov could not be used (not every null return has one). */
+internal fun parseLegHeader(ftyp: ByteArray?, moov: ByteArray, problem: StringBuilder? = null): LegHeader? {
     val moovHdr = if (moov.u32(0) == 1L) 16 else 8
     val kids = moov.boxes(moovHdr, moov.size)
     val mvhd = kids.firstOrNull { it.type == "mvhd" } ?: return null
-    val trak = kids.firstOrNull { it.type == "trak" } ?: return null
+    val traks = kids.filter { it.type == "trak" }
+    // One track per leg: the merge copies this one trak into its header and reads one traf per moof
+    // (see parseMoof), so a second track can never be merged. Said here, naming what it is, instead
+    // of letting the first fragment fail with a layout error that does not.
+    if (traks.size > 1) {
+        problem?.append("${traks.size} tracks (${traks.joinToString { trakHandlerOf(moov, it) }}), expected one")
+        return null
+    }
+    val trak = traks.firstOrNull() ?: return null
     val trakKids = moov.boxes(trak.payload, trak.end)
     val tkhd = trakKids.firstOrNull { it.type == "tkhd" } ?: return null
     val tkhdVersion = moov.u8(tkhd.payload)
@@ -4698,6 +4787,7 @@ internal fun parseMoof(moof: ByteArray, trexDefaultDuration: Long, problem: Stri
     val trafs = kids.filter { it.type == "traf" }
     // One track per leg means one traf per moof. A writer that packs several would need the
     // base offsets of the later ones reasoned about; not worth supporting, but never mis-read.
+    // (What first tripped this was ffmpeg's chapter text track: see -map_chapters in the ffmpeg legs.)
     if (trafs.size != 1) return bad("${trafs.size} trafs (children: ${kids.joinToString { it.type }})")
     val traf = trafs[0]
     val tkids = moof.boxes(traf.payload, traf.end)
@@ -4788,8 +4878,12 @@ internal class LegIndexer(private val file: File) {
                         "ftyp" -> if (size <= MAX_HEADER_BOX_BYTES) ftyp = readBytes(raf, pos, size.toInt())
                         "moov" -> {
                             if (size > MAX_HEADER_BOX_BYTES) { error = "moov of $size bytes"; break@scan }
-                            val parsed = parseLegHeader(ftyp, readBytes(raf, pos, size.toInt()))
-                            if (parsed == null) { error = "unreadable moov at $pos"; break@scan }
+                            val problem = StringBuilder()
+                            val parsed = parseLegHeader(ftyp, readBytes(raf, pos, size.toInt()), problem)
+                            if (parsed == null) {
+                                error = "unreadable moov at $pos" + (if (problem.isEmpty()) "" else " ($problem)")
+                                break@scan
+                            }
                             leg.acceptHeader(parsed)
                             changed = true
                         }
@@ -4928,8 +5022,9 @@ internal class FragmentStreamParser(private val leg: FragmentLeg) {
         when (type) {
             "ftyp" -> ftyp = box
             "moov" -> {
-                val h = parseLegHeader(ftyp, box)
-                if (h == null) { error = "unreadable moov"; return }
+                val problem = StringBuilder()
+                val h = parseLegHeader(ftyp, box, problem)
+                if (h == null) { error = "unreadable moov" + (if (problem.isEmpty()) "" else " ($problem)"); return }
                 leg.acceptHeader(h)
             }
             "moof" -> pendingMoof = box
@@ -5019,8 +5114,15 @@ private class PipeSource(private val leg: FragmentLeg, private val maxLeadMs: Lo
  * old whole-file encode its last frames, so it is judged here, by the leg's
  * own fragment count, rather than discovered later in the output.
  *
+ * A fragment stream the merge cannot read is known from its first bad box, and
+ * the encode is cancelled there instead of being left to finish: a leg whose
+ * output is unusable from its first fragment would otherwise cost its whole
+ * encode before the run failed -- and, through the other leg, everything that
+ * one encoded in the meantime with nothing able to be merged.
+ *
  * [stallAbortMs], when set, kills an encode whose output has not grown for
- * that long (time spent deliberately not reading a full pipe does not count).
+ * that long (time spent deliberately not reading a full pipe does not count,
+ * nor does time the encode itself marks with [FragmentLeg.stallExempt]).
  * A fragmented writer grows in whole fragments, about one GOP, so this must be
  * sized well above a GOP of encode time. It exists because without per-chunk
  * budgets a wedged encoder would otherwise only be stopped by the budget for
@@ -5055,13 +5157,23 @@ internal fun CoroutineScope.launchLeg(
         var lastGrowth = -1L
         var lastGrowthAt = System.currentTimeMillis()
         var stalled = false
+        // The output turned out to be something the merge cannot use (see the doc above).
+        var unreadable = false
         try {
             while (true) {
                 val done = encoding.isCompleted // sampled BEFORE the pull so the last pull sees everything
                 val progressed = source.pull()
+                // Only while the encode is still running: one that has already finished is left to the
+                // verdict below, so a failed encode is still reported as failed rather than as unreadable.
+                if (!done && source.error != null) {
+                    Log.e(ASSEMBLER_TAG, "${leg.label}: unreadable output (${source.error}) -- aborting the encode")
+                    unreadable = true
+                    encoding.cancel()
+                    break
+                }
                 val now = System.currentTimeMillis()
                 val growth = source.growth()
-                if (growth != lastGrowth || source.holdingBack()) { lastGrowth = growth; lastGrowthAt = now }
+                if (growth != lastGrowth || source.holdingBack() || leg.stallExempt) { lastGrowth = growth; lastGrowthAt = now }
                 if (done && !progressed && !source.holdingBack()) break
                 if (stallAbortMs != null && now - lastGrowthAt >= stallAbortMs) {
                     Log.e(ASSEMBLER_TAG, "${leg.label}: no growth for ${now - lastGrowthAt}ms -- aborting the encode")
@@ -5071,7 +5183,9 @@ internal fun CoroutineScope.launchLeg(
                 }
                 if (!progressed) delay(source.pollMs)
             }
-            val encodeOk = !stalled && encoding.await()
+            // An encode this loop cancelled itself (stalled, unreadable) is not awaited: awaiting a
+            // cancelled job throws, and its verdict is the loop's own.
+            val encodeOk = !stalled && (unreadable || encoding.await())
             val h = leg.header
             val verdict: String? = when {
                 stalled -> "stalled"

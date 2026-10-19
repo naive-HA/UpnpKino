@@ -112,7 +112,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             requiredPermissions.add("android.permission.READ_EXTERNAL_STORAGE")
         }
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+        if (android.os.Build.VERSION.SDK_INT >= 37) {
             requiredPermissions.add("android.permission.ACCESS_LOCAL_NETWORK")
         }
         val missingPermissions = requiredPermissions.filter {
@@ -325,7 +325,7 @@ class MainActivity : AppCompatActivity() {
                     throw Exception("Error: Notification permission not granted")
                 }
             }
-            if (android.os.Build.VERSION.SDK_INT >= 35 && ContextCompat.checkSelfPermission(this, "android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED) {
+            if (android.os.Build.VERSION.SDK_INT >= 37 && ContextCompat.checkSelfPermission(this, "android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED) {
                 throw Exception("Error: Local network permission not granted")
             }
 
