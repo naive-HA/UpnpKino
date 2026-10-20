@@ -6,6 +6,9 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
 import androidx.annotation.StringRes
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
@@ -52,6 +55,21 @@ object StartPreconditions {
             ?.let { return Outcome.Blocked(it) }
         folderProblem(context, musicUri, R.string.error_music_folder_access_lost, R.string.error_music_folder_missing)
             ?.let { return Outcome.Blocked(it) }
+
+        @Suppress("DEPRECATION")
+        val hasVpn = connectivityManager.allNetworks.any { network ->
+            connectivityManager.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+        }
+        if (hasVpn) {
+            Constants.vibrate(context)
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(
+                    context,
+                    "Warning: VPN detected. Potential connectivity issues",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
 
         return Outcome.Ready(ipAddress)
     }

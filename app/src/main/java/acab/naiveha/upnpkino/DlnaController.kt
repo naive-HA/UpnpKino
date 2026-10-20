@@ -4,11 +4,12 @@ import android.content.Context
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import okhttp3.ConnectionPool
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.atomic.AtomicInteger
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.collections.set
@@ -29,23 +30,41 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         private const val PLAYING_PROGRESS_POLL_MS = 1_000L
         private const val PAUSED_PROGRESS_POLL_MS = 2_000L
         private const val BACKGROUND_PROGRESS_POLL_MS = 10_000L
+        private const val HTTP_MAX_RETRIES = 3
+        private const val HTTP_RETRY_DELAY_MS = 500L
+        private const val SUBSCRIPTION_RETRY_MIN_MS = 1_000L
+        private const val SUBSCRIPTION_RETRY_MAX_MS = 60_000L
+        private const val CONTROL_TIMEOUT_FACTOR = 3
     }
     private val repo = UpnpRepository.dlna
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val baseClient: OkHttpClient = OkHttpClient.Builder()
+        .socketFactory(BoundSocketFactory { upnpService.configuration.getInetAddress() })
+        .connectionPool(ConnectionPool(2, 30, TimeUnit.SECONDS))
+        .build()
     private val client: OkHttpClient
         get() {
             val timeout = UpnpRepository.upnp.httpTimeoutSec.value.toLong()
-            return OkHttpClient.Builder()
+            return baseClient.newBuilder()
                 .connectTimeout(timeout, TimeUnit.SECONDS)
                 .readTimeout(timeout, TimeUnit.SECONDS)
-                .socketFactory(BoundSocketFactory { upnpService.configuration.getInetAddress() })
                 .build()
         }
+    private fun httpClientForCommand(command: Action): OkHttpClient {
+        val base = client
+        val factor = when (command) {
+            Action.SET_AV_TRANSPORT_URI, Action.PLAY, Action.SEEK -> CONTROL_TIMEOUT_FACTOR
+            else -> 1
+        }
+        if (factor == 1) return base
+        return base.newBuilder()
+            .readTimeout(base.readTimeoutMillis.toLong() * factor, TimeUnit.MILLISECONDS)
+            .build()
+    }
     @Volatile private var pollingJob: Job? = null
     @Volatile private var subscriptionJob: Job? = null
     private val pollingMutex = Mutex()
     private val subscriptionSids = ConcurrentHashMap<String, String>()
-    private val minSubscriptionTimeoutSeconds = AtomicInteger(SUBSCRIPTION_TIMEOUT)
     private val subscriptionMutex = Mutex()
     private val pendingDevices = ConcurrentHashMap.newKeySet<String>()
     val dlnaDevices: MutableMap<String, DlnaNodeModel> = ConcurrentHashMap<String, DlnaNodeModel>()
@@ -234,29 +253,25 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             }
             subscriptionSids.clear()
             subscriptionJob = scope.launch {
-                while (isActive) {
-                    val services = listOf("AVTransport", "ConnectionManager")
-                    for (service in services) {
-                        val eventUrl = dlnaDevice.eventUrls[service]
-                        if (eventUrl != null) {
+                for (service in listOf("AVTransport", "ConnectionManager")) {
+                    val eventUrl = dlnaDevice.eventUrls[service] ?: continue
+                    launch {
+                        var retryDelayMs = SUBSCRIPTION_RETRY_MIN_MS
+                        while (isActive) {
                             val sid = subscriptionSids[service]
                             val result = sendSubscribeRequest(dlnaDevice, eventUrl, "/${upnpService.configuration.uuid}/dlnaSubscriptionCallback", sid)
                             if (result != null) {
                                 val (newSid, timeout) = result
                                 subscriptionSids[service] = newSid
-                                if (timeout < minSubscriptionTimeoutSeconds.get()) {
-                                    minSubscriptionTimeoutSeconds.set(timeout)
-                                }
+                                retryDelayMs = SUBSCRIPTION_RETRY_MIN_MS
+                                delay((timeout * 0.8 * SUBSCRIPTION_POLL_MS).toLong().milliseconds)
                             } else {
                                 subscriptionSids.remove(service)
+                                Log.d(TAG, "Event subscription ($service) failed for ${dlnaDevice.friendlyName}, retrying in ${retryDelayMs / 1000} s")
+                                delay(retryDelayMs.milliseconds)
+                                retryDelayMs = (retryDelayMs * 2).coerceAtMost(SUBSCRIPTION_RETRY_MAX_MS)
                             }
                         }
-                    }
-                    if (subscriptionSids.isEmpty()) {
-                        delay(SUBSCRIPTION_POLL_MS.milliseconds)
-                    } else {
-                        val renewalDelay = (minSubscriptionTimeoutSeconds.get() * 0.8 * SUBSCRIPTION_POLL_MS).toLong()
-                        delay(renewalDelay.milliseconds)
                     }
                 }
             }
@@ -293,10 +308,12 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
                 } else if (response.code == 412 && sid != null) {
                     sendSubscribeRequest(device, url, callback, null)
                 } else {
+                    Log.w(TAG, "SUBSCRIBE to $fullUrl rejected: HTTP ${response.code}")
                     null
                 }
             }
         } catch (e: Exception) {
+            Log.w(TAG, "SUBSCRIBE to $fullUrl failed: $e")
             null
         }
     }
@@ -403,7 +420,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         return false
     }
 
-    private fun sendMediaCommand(command: Action, args: Map<String, String>): String? {
+    private fun sendMediaCommand(command: Action, args: Map<String, String>, maxRetries: Int = HTTP_MAX_RETRIES): String? {
         val deviceId = repo.selectedDeviceId.value
         val devices = repo.devices.value
         val device = deviceId?.let { devices?.get(it) } ?: run {
@@ -415,35 +432,53 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
             return null
         }
         Log.d(TAG, "Sending SOAP command: ${command.actionName} to ${device.friendlyName}")
-        return try {
-            val fullUrl = resolveUrl(device, soapUrl)
-            val serviceUrn = device.serviceUrns[command.service] ?: run {
-                Log.e(TAG, "Service ${command.service} not supported by device")
-                throw Exception("Service ${command.service} not supported by device")
-            }
-            val payload = upnpService.upnpMessages.draftDlnaMessage(command.actionName, serviceUrn, args, device.mediaCollection)
-            val request = Request.Builder()
-                .url(fullUrl)
-                .post(payload.toRequestBody("text/xml; charset=utf-8".toMediaType()))
-                .addHeader("SOAPACTION", "\"$serviceUrn#${command.actionName}\"")
-                .build()
-            client.newCall(request).execute().use { response ->
-                val responseBody = response.body.string()
-                Log.d(TAG, "SOAP command ${command.actionName} response: code=${response.code}")
-                if (response.isSuccessful && responseBody.isNotEmpty()) {
-                    val expectedResponse = command.responseName
-                    if (expectedResponse.isNotEmpty() && upnpService.upnpMessages.parseUpnpHttpRequest(responseBody) == expectedResponse
-                    ) {
-                        return responseBody
+        var attempt = 0
+        while (true) {
+            attempt++
+            try {
+                return sendHttpQuery(command, args, device, soapUrl)
+            } catch (e: Exception) {
+                if (e is IOException && attempt <= maxRetries && scope.isActive) {
+                    Log.w(TAG, "SOAP command ${command.actionName} failed (attempt $attempt of ${maxRetries + 1}), retrying: $e")
+                    try {
+                        Thread.sleep(HTTP_RETRY_DELAY_MS)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return null
                     }
+                } else {
+                    Log.e(TAG, "Exception sending SOAP command: ${command.actionName}, giving up after $attempt attempt(s)", e)
+                    if (scope.isActive) repo.setStreamingFlag(Action.ERROR)
+                    return null
                 }
-                Log.w(TAG, "SOAP command ${command.actionName} failed: code=${response.code} body=$responseBody")
-                return null
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception sending SOAP command: ${command.actionName}", e)
-            repo.setStreamingFlag(Action.ERROR)
-            null
+        }
+    }
+
+    private fun sendHttpQuery(command: Action, args: Map<String, String>, device: DlnaNodeModel, soapUrl: String): String? {
+        val fullUrl = resolveUrl(device, soapUrl)
+        val serviceUrn = device.serviceUrns[command.service] ?: run {
+            Log.e(TAG, "Service ${command.service} not supported by device")
+            throw Exception("Service ${command.service} not supported by device")
+        }
+        val payload = upnpService.upnpMessages.draftDlnaMessage(command.actionName, serviceUrn, args, device.mediaCollection)
+        val request = Request.Builder()
+            .url(fullUrl)
+            .post(payload.toRequestBody("text/xml; charset=utf-8".toMediaType()))
+            .addHeader("SOAPACTION", "\"$serviceUrn#${command.actionName}\"")
+            .build()
+        return httpClientForCommand(command).newCall(request).execute().use { response ->
+            val responseBody = response.body.string()
+            Log.d(TAG, "SOAP command ${command.actionName} response: code=${response.code}")
+            val expectedResponse = command.responseName
+            if (response.isSuccessful && responseBody.isNotEmpty() && expectedResponse.isNotEmpty() &&
+                upnpService.upnpMessages.parseUpnpHttpRequest(responseBody) == expectedResponse
+            ) {
+                responseBody
+            } else {
+                Log.w(TAG, "SOAP command ${command.actionName} failed: code=${response.code} body=$responseBody")
+                null
+            }
         }
     }
 
@@ -602,6 +637,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
     fun release() {
         resetDlnaActivity()
         scope.cancel()
+        baseClient.connectionPool.evictAll()
     }
 
     private fun resetDlnaActivity() {
@@ -618,7 +654,7 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         val dlnaDevice = selectedDeviceId?.let { dlnaDevicesMap?.get(it) }
         if (dlnaDevice != null) {
             runBlocking(Dispatchers.IO) {
-                runCatching { sendMediaCommand(Action.STOP, mapOf()) }
+                runCatching { sendMediaCommand(Action.STOP, mapOf(), maxRetries = 0) }
             }
         }
         repo.setStreamingFlag(Action.STOP)

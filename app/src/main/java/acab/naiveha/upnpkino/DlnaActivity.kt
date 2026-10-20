@@ -145,26 +145,26 @@ class DlnaActivity : AppCompatActivity() {
                 velocityX: Float,
                 velocityY: Float
             ): Boolean {
-                if (e1 == null) return false
-                val diffX = e2.x - e1.x
-                val diffY = e2.y - e1.y
-                if (kotlin.math.abs(diffX) > kotlin.math.abs(diffY)) {
-                    if (kotlin.math.abs(diffX) > SWIPE_THRESHOLD && kotlin.math.abs(velocityX) > SWIPE_VELOCITY_THRESHOLD) {
-                        if (diffX > 0) {
-                            // Swipe Right -> previous tab
-                            if (currentTab > 0) {
-                                switchTab(currentTab - 1)
-                                return true
-                            }
-                        } else {
-                            // Swipe Left -> next tab
-                            if (currentTab < 2) {
-                                switchTab(currentTab + 1)
-                                return true
-                            }
-                        }
-                    }
-                }
+//                if (e1 == null) return false
+//                val diffX = e2.x - e1.x
+//                val diffY = e2.y - e1.y
+//                if (kotlin.math.abs(diffX) > kotlin.math.abs(diffY)) {
+//                    if (kotlin.math.abs(diffX) > SWIPE_THRESHOLD && kotlin.math.abs(velocityX) > SWIPE_VELOCITY_THRESHOLD) {
+//                        if (diffX > 0) {
+//                            // Swipe Right -> previous tab
+//                            if (currentTab > 0) {
+//                                switchTab(currentTab - 1)
+//                                return true
+//                            }
+//                        } else {
+//                            // Swipe Left -> next tab
+//                            if (currentTab < 2) {
+//                                switchTab(currentTab + 1)
+//                                return true
+//                            }
+//                        }
+//                    }
+//                }
                 return false
             }
         })

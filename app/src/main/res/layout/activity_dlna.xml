@@ -25,7 +25,8 @@
             app:layout_constraintBottom_toBottomOf="@+id/menu_icon"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toTopOf="@+id/menu_icon">
+            app:layout_constraintTop_toTopOf="@+id/menu_icon"
+            android:visibility="invisible">
 
             <LinearLayout
                 android:id="@+id/tab_settings"
@@ -692,7 +693,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="The maximum time allowed to wait for data/response packets (such as fetching device description XML, subscribing to events, or sending SOAP commands) after the connection is established"
+                    android:text="The maximum time allowed to wait for data/response packets (such as fetching device description XML, subscribing to events, or sending SOAP commands) after the connection is established. Commands that make the renderer load or buffer media (set media, play, seek) wait three times as long"
                     android:textColor="@color/darker_grey"
                     android:textSize="13sp"
                     app:layout_constraintTop_toBottomOf="@+id/label_http_timeout"
