@@ -29,15 +29,18 @@ class DlnaController(val context: Context, val upnpService: UpnpService) {
         private const val PLAYING_PROGRESS_POLL_MS = 1_000L
         private const val PAUSED_PROGRESS_POLL_MS = 2_000L
         private const val BACKGROUND_PROGRESS_POLL_MS = 10_000L
-        private const val HTTP_TIMEOUT = 5L
     }
     private val repo = UpnpRepository.dlna
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(HTTP_TIMEOUT, TimeUnit.SECONDS)
-        .readTimeout(HTTP_TIMEOUT, TimeUnit.SECONDS)
-        .socketFactory(BoundSocketFactory { upnpService.configuration.getInetAddress() })
-        .build()
+    private val client: OkHttpClient
+        get() {
+            val timeout = UpnpRepository.upnp.httpTimeoutSec.value.toLong()
+            return OkHttpClient.Builder()
+                .connectTimeout(timeout, TimeUnit.SECONDS)
+                .readTimeout(timeout, TimeUnit.SECONDS)
+                .socketFactory(BoundSocketFactory { upnpService.configuration.getInetAddress() })
+                .build()
+        }
     @Volatile private var pollingJob: Job? = null
     @Volatile private var subscriptionJob: Job? = null
     private val pollingMutex = Mutex()

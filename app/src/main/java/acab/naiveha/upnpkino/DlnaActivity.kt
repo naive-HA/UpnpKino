@@ -145,26 +145,26 @@ class DlnaActivity : AppCompatActivity() {
                 velocityX: Float,
                 velocityY: Float
             ): Boolean {
-//                if (e1 == null) return false
-//                val diffX = e2.x - e1.x
-//                val diffY = e2.y - e1.y
-//                if (kotlin.math.abs(diffX) > kotlin.math.abs(diffY)) {
-//                    if (kotlin.math.abs(diffX) > SWIPE_THRESHOLD && kotlin.math.abs(velocityX) > SWIPE_VELOCITY_THRESHOLD) {
-//                        if (diffX > 0) {
-//                            // Swipe Right -> previous tab
-//                            if (currentTab > 0) {
-//                                switchTab(currentTab - 1)
-//                                return true
-//                            }
-//                        } else {
-//                            // Swipe Left -> next tab
-//                            if (currentTab < 2) {
-//                                switchTab(currentTab + 1)
-//                                return true
-//                            }
-//                        }
-//                    }
-//                }
+                if (e1 == null) return false
+                val diffX = e2.x - e1.x
+                val diffY = e2.y - e1.y
+                if (kotlin.math.abs(diffX) > kotlin.math.abs(diffY)) {
+                    if (kotlin.math.abs(diffX) > SWIPE_THRESHOLD && kotlin.math.abs(velocityX) > SWIPE_VELOCITY_THRESHOLD) {
+                        if (diffX > 0) {
+                            // Swipe Right -> previous tab
+                            if (currentTab > 0) {
+                                switchTab(currentTab - 1)
+                                return true
+                            }
+                        } else {
+                            // Swipe Left -> next tab
+                            if (currentTab < 2) {
+                                switchTab(currentTab + 1)
+                                return true
+                            }
+                        }
+                    }
+                }
                 return false
             }
         })
@@ -260,7 +260,6 @@ class DlnaActivity : AppCompatActivity() {
                 .setPositiveButton(android.R.string.ok, null)
                 .show()
         }
-        // SSDP Timings Toggle Group
         binding.toggleGroupSsdp?.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (isChecked) {
                 val sec = when (checkedId) {
@@ -281,7 +280,6 @@ class DlnaActivity : AppCompatActivity() {
             binding.toggleGroupSsdp?.check(R.id.btn_ssdp_8s)
         }
 
-        // Buffer Size Toggle Group
         binding.toggleGroupBuffer?.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (isChecked) {
                 val size = when (checkedId) {
@@ -306,7 +304,6 @@ class DlnaActivity : AppCompatActivity() {
             binding.toggleGroupBuffer?.check(R.id.btn_buf_32k)
         }
 
-        // Datagram Buffer Toggle Group
         binding.toggleGroupDatagram?.addOnButtonCheckedListener { _, checkedId, isChecked ->
             if (isChecked) {
                 val size = when (checkedId) {
@@ -327,6 +324,26 @@ class DlnaActivity : AppCompatActivity() {
         }
         binding.resetDatagram?.setOnClickListener {
             binding.toggleGroupDatagram?.check(R.id.btn_data_4096)
+        }
+
+        binding.toggleGroupHttpTimeout?.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (isChecked) {
+                val sec = when (checkedId) {
+                    R.id.btn_timeout_10s -> 10
+                    R.id.btn_timeout_15s -> 15
+                    else -> 5
+                }
+                binding.valueHttpTimeout?.text = "$sec seconds"
+                UpnpRepository.upnp.setHttpTimeoutSec(sec)
+            }
+        }
+        when (UpnpRepository.upnp.httpTimeoutSec.value) {
+            10 -> binding.toggleGroupHttpTimeout?.check(R.id.btn_timeout_10s)
+            15 -> binding.toggleGroupHttpTimeout?.check(R.id.btn_timeout_15s)
+            else -> binding.toggleGroupHttpTimeout?.check(R.id.btn_timeout_5s)
+        }
+        binding.resetHttpTimeout?.setOnClickListener {
+            binding.toggleGroupHttpTimeout?.check(R.id.btn_timeout_5s)
         }
         val versionText = getString(R.string.version_info, BuildConfig.VERSION_NAME)
         binding.textView?.text = versionText
@@ -607,6 +624,7 @@ class DlnaActivity : AppCompatActivity() {
                             binding.mediaFile.text = getString(R.string.status_error)
                             binding.mediaFile.setTextColor(darkGrey)
                             binding.buttonPlay.isEnabled = false
+                            binding.buttonPlay.setImageResource(R.drawable.play_circle)
                             binding.buttonStop.isEnabled = false
                             binding.seekBar.isEnabled = false
                             binding.seekBar.progress = 0

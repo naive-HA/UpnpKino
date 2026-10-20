@@ -58,10 +58,14 @@ object UpnpRepository {
         private val _datagramBufferSize = MutableStateFlow(4096)
         val datagramBufferSize = _datagramBufferSize.asStateFlow()
 
+        private val _httpTimeoutSec = MutableStateFlow(5)
+        val httpTimeoutSec = _httpTimeoutSec.asStateFlow()
+
         fun setRepeatAliveNotification(value: Boolean) { _repeatAliveNotification.value = value }
         fun setSsdpTimeoutSec(value: Int) { _ssdpTimeoutSec.value = value }
         fun setReceiveBufferSize(value: Int) { _receiveBufferSize.value = value }
         fun setDatagramBufferSize(value: Int) { _datagramBufferSize.value = value }
+        fun setHttpTimeoutSec(value: Int) { _httpTimeoutSec.value = value }
 
         fun stop() {
             _repeatAliveNotification.value = false
