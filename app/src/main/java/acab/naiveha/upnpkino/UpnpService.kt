@@ -1,0 +1,317 @@
+package acab.naiveha.upnpkino
+
+import android.annotation.SuppressLint
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.ComponentCallbacks2
+import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.net.wifi.WifiManager
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.PowerManager
+import android.util.Log
+import android.widget.Toast
+import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.InetAddress
+
+class UpnpService : Service() {
+    companion object {
+        private const val TAG = "UpnpService"
+        private const val CHANNEL_ID = "UpnpKinoServiceChannelLow"
+        private const val LEGACY_CHANNEL_ID = "UpnpKinoServiceChannel"
+        private const val NETWORK_LOSS_GRACE_MS = 10_000L
+    }
+    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private lateinit var multicastServer: MulticastServer
+    private lateinit var httpServer: HttpServer
+    lateinit var configuration: Configuration
+    lateinit var mediaCollection: MediaCollection
+    lateinit var preferences: Preferences
+    lateinit var upnpMessages: UpnpMessages
+    lateinit var dlnaController: DlnaController
+    lateinit var transcoderController: TranscoderController
+    lateinit var chromecastController: ChromecastController
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var multicastLock: WifiManager.MulticastLock? = null
+    private lateinit var connectivityManager: ConnectivityManager
+    private val mainHandler = Handler(Looper.getMainLooper())
+    @Volatile private var serviceNetwork: Network? = null
+    private val stopAfterNetworkLoss = Runnable {
+        Constants.vibrate(this@UpnpService)
+        Toast.makeText(this@UpnpService, getString(R.string.error_network_disconnected), Toast.LENGTH_LONG).show()
+        stopSelf()
+    }
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            super.onAvailable(network)
+        }
+
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+            super.onLinkPropertiesChanged(network, linkProperties)
+            val servedAddress = configuration.getInetAddress() ?: return
+            if (linkProperties.linkAddresses.any { it.address == servedAddress }) {
+                serviceNetwork = network
+                mainHandler.removeCallbacks(stopAfterNetworkLoss)
+            }
+        }
+
+        override fun onLost(network: Network) {
+            super.onLost(network)
+            val ours = serviceNetwork
+            if (ours != null && network != ours) return
+            serviceNetwork = null
+            mainHandler.removeCallbacks(stopAfterNetworkLoss)
+            mainHandler.postDelayed(stopAfterNetworkLoss, NETWORK_LOSS_GRACE_MS)
+            Constants.vibrate(this@UpnpService)
+            mainHandler.post {
+                Toast.makeText(this@UpnpService, "Network lost. UPnP Kino will stop unless network is not restored", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+
+    override fun onBind(intent: Intent?): IBinder? {
+        return null
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        Log.d(TAG, "onCreate")
+        preferences = Preferences(this@UpnpService)
+        configuration = Configuration(this@UpnpService, this@UpnpService)
+        mediaCollection = MediaCollection(this@UpnpService, this@UpnpService)
+        upnpMessages = UpnpMessages(this@UpnpService, this@UpnpService)
+        connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+    }
+
+    @SuppressLint("WakelockTimeout")
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val ipAddressStr = intent?.getStringExtra("ip_address")
+        Log.d(TAG, "onStartCommand: ipAddress=$ipAddressStr")
+        if (ipAddressStr == null) {
+            Log.e(TAG, "onStartCommand: ipAddress is null, stopping self")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        if (UpnpRepository.kinoService.isStarting.value || UpnpRepository.kinoService.isRunning.value) {
+            Log.w(TAG, "onStartCommand: already starting or running, ignoring duplicate start")
+            return START_NOT_STICKY
+        }
+
+        UpnpRepository.kinoService.setStarting(true)
+        createNotificationChannel()
+        startForeground(1, createNotification(getString(R.string.notification_starting)))
+
+        serviceScope.launch {
+            val ipAddress = try {
+                withContext(Dispatchers.IO) {
+                    InetAddress.getByName(ipAddressStr)
+                }
+            } catch (e: Exception) {
+                null
+            }
+
+            if (ipAddress == null) {
+                Log.e(TAG, "Failed to resolve IP address: $ipAddressStr")
+                stopSelf()
+                return@launch
+            }
+
+            configuration.setInetAddress(ipAddress)
+            val networkRequest = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+            Log.d(TAG, "Registering network callback")
+            connectivityManager.registerNetworkCallback(networkRequest, networkCallback)
+
+            FfmpegInstaller.install(this@UpnpService)
+
+            //TODO: register a listener for changes to storage/shared folder
+            //if any changes, update the configuration
+            //TODO: put a lock on the shared folder to prevent deletion while service is running
+            httpServer = HttpServer(this@UpnpService, this@UpnpService)
+            Log.d(TAG, "Starting HTTP server")
+            val (httpPort, status) = httpServer.start()
+            if (httpPort == -1) {
+                Log.e(TAG, "HTTP server failed to start: $status")
+                Constants.vibrate(this@UpnpService)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@UpnpService, status, Toast.LENGTH_LONG).show()
+                }
+                stopSelf()
+            } else {
+                configuration.setHttpServerPort(httpPort)
+                Log.d(TAG, "HTTP server started on port $httpPort. Reading shared folder.")
+                mediaCollection.readSharedFolder()
+                dlnaController = DlnaController(this@UpnpService, this@UpnpService)
+                transcoderController = TranscoderController(this@UpnpService, this@UpnpService)
+                chromecastController = ChromecastController(this@UpnpService, this@UpnpService)
+                multicastServer = MulticastServer(this@UpnpService)
+                Log.d(TAG, "Starting multicast server")
+                val (multicastPort, multicastStatus) = multicastServer.start()
+                if (multicastPort == -1) {
+                    Log.e(TAG, "Multicast server failed to start: $multicastStatus")
+                    Constants.vibrate(this@UpnpService)
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(this@UpnpService, multicastStatus, Toast.LENGTH_LONG).show()
+                        Log.e("upnpkino", multicastStatus)
+                    }
+                    stopSelf()
+                } else {
+                    val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+                    wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "UpnpStreamer::WakeLock")
+                    wakeLock?.acquire()
+
+                    val wifiManager = getSystemService(WIFI_SERVICE) as WifiManager
+                    multicastLock = wifiManager.createMulticastLock("UpnpStreamer::MulticastLock")
+                    multicastLock?.setReferenceCounted(true)
+                    multicastLock?.acquire()
+
+                    val currentIpAddress = configuration.getIpAddress()
+                    Log.d(TAG, "Service successfully started on $currentIpAddress")
+                    updateNotification(getString(R.string.notification_running, currentIpAddress ?: ""))
+                    UpnpRepository.kinoService.setStarting(false)
+                    UpnpRepository.kinoService.setRunning(true)
+                }
+            }
+        }
+        return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        Log.d(TAG, "onDestroy")
+        if (this::dlnaController.isInitialized) {
+            Log.d(TAG, "Releasing DlnaController")
+            dlnaController.release()
+        }
+        if (this::transcoderController.isInitialized) {
+            Log.d(TAG, "Releasing TranscoderController")
+            transcoderController.release()
+        }
+        if (this::chromecastController.isInitialized) {
+            Log.d(TAG, "Releasing ChromecastController")
+            chromecastController.release()
+        }
+        super.onDestroy()
+        serviceScope.cancel()
+        mainHandler.removeCallbacks(stopAfterNetworkLoss)
+        if (this::configuration.isInitialized) {
+            Log.d(TAG, "Releasing Configuration")
+            configuration.release()
+        }
+        if (this::httpServer.isInitialized) {
+            Log.d(TAG, "Stopping HttpServer")
+            httpServer.stop()
+        }
+        if (this::multicastServer.isInitialized) {
+            Log.d(TAG, "Stopping MulticastServer")
+            multicastServer.stop()
+        }
+        if (this::connectivityManager.isInitialized) {
+            try {
+                Log.d(TAG, "Unregistering network callback")
+                connectivityManager.unregisterNetworkCallback(networkCallback)
+            } catch (e: Exception) {
+                //ignore. we are shutting down anyway
+            }
+        }
+        if (this::preferences.isInitialized) {
+             // preferences don't have release but good for consistency
+        }
+        if (this::upnpMessages.isInitialized) {
+             // upnpMessages don't have release but good for consistency
+        }
+
+        // Release locks
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+        }
+        wakeLock = null
+        if (multicastLock?.isHeld == true) {
+            multicastLock?.release()
+        }
+        multicastLock = null
+
+        UpnpRepository.stop()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level == ComponentCallbacks2.TRIM_MEMORY_COMPLETE) {
+            val activityManager = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+            val memoryInfo = android.app.ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memoryInfo)
+
+            if (memoryInfo.lowMemory) {
+                Constants.vibrate(this@UpnpService)
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(this@UpnpService, getString(R.string.error_memory_low), Toast.LENGTH_LONG).show()
+                }
+                stopSelf()
+            }
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        Constants.vibrate(this@UpnpService)
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(this@UpnpService, getString(R.string.error_memory_low), Toast.LENGTH_LONG).show()
+        }
+        stopSelf()
+    }
+
+    private fun createNotificationChannel() {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.deleteNotificationChannel(LEGACY_CHANNEL_ID)
+        val serviceChannel = NotificationChannel(
+            CHANNEL_ID,
+            "UPnP Kino",
+            NotificationManager.IMPORTANCE_LOW
+        )
+        manager.createNotificationChannel(serviceChannel)
+    }
+
+    private fun createNotification(contentText: String): Notification {
+        val notificationIntent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            notificationIntent,
+            PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("UPnP Kino")
+            .setContentText(contentText)
+            .setSmallIcon(R.drawable.ic_video)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+
+        builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+
+        return builder.build()
+    }
+
+    private fun updateNotification(text: String) {
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(1, createNotification(text))
+    }
+}
