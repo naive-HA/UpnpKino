@@ -1,3 +1,4 @@
+[<img src="https://github.com/naive-HA/upnpkino/blob/master/fastlane/metadata/android/en-US/images/google%20play.png" height="80" alt="Get it on Google Play">](https://play.google.com/store/apps/details?id=acab.naiveha.upnpkino.by.naiveha)
 [<img src="https://gitlab.com/IzzyOnDroid/repo/-/raw/master/assets/IzzyOnDroidButtonGreyBorder_nofont.png" height="80" alt="Get it at IzzyOnDroid">](https://apt.izzysoft.de/packages/acab.naiveha.upnpkino)
 
 # UPnP Kino by naiveHA
