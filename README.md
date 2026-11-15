@@ -56,7 +56,9 @@ that break legacy apps
 
 ## Screenshots
 
-<img src="hi-res-img/mobileVLC.png" width="30%" alt="Streaming to VLC on mobile">
+<p align="center">
+  <img src="hi-res-img/mobileVLC.png" width="30%" alt="Streaming to VLC on mobile">
+</p>
 
 <img src="hi-res-img/desktopVLC.png" width="" alt="Streaming to VLC on desktop">
 
