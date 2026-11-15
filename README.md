@@ -56,16 +56,13 @@ that break legacy apps
 
 ## Screenshots
 
-<p align="center">
-  <img src="hi-res-img/desktopVLC.png" width="45%" alt="Streaming to VLC on desktop">
-  &nbsp;&nbsp;
-  <img src="hi-res-img/kodi.png" width="45%" alt="Streaming to Kodi">
-</p>
-<p align="center">
-  <img src="hi-res-img/mobileVLC.png" width="30%" alt="Streaming to VLC on mobile">
-  &nbsp;&nbsp;
-  <img src="hi-res-img/eezUPnP.png" width="30%" alt="Streaming to eezUPnP">
-</p>
+<img src="hi-res-img/mobileVLC.png" width="30%" alt="Streaming to VLC on mobile">
+
+<img src="hi-res-img/desktopVLC.png" width="" alt="Streaming to VLC on desktop">
+
+<img src="hi-res-img/kodi.png" width="45%" alt="Streaming to Kodi">
+
+<img src="hi-res-img/eezUPnP.png" width="30%" alt="Streaming to eezUPnP">
 
 ## Compatibility
 
