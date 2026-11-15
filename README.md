@@ -62,7 +62,7 @@ that break legacy apps
 
 <p align="center"><img src="hi-res-img/kodi.png" width="75%" alt="Streaming to Kodi"></p>
 
-<p align="center"><img src="hi-res-img/eezUPnP.png" width="60%" alt="Streaming to eezUPnP"></p>
+<p align="center"><img src="hi-res-img/eezUPnP.png" width="75%" alt="Streaming to eezUPnP"></p>
 
 ## Compatibility
 
