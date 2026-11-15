@@ -69,7 +69,7 @@ that break legacy apps
 - **Android**: 10 (API 29) or higher
 - **Architecture**: arm64-v8a, armeabi-v7a, x86, x86_64
 
-### Tested Players
+## Tested Players
 **VLC** (Desktop & Mobile), **eezUPnP**, **Kodi**
 
 ## Permissions Explained
