@@ -37,8 +37,6 @@ No uploading to any cloud. The video never leaves your home network.
 **No accounts. No subscriptions. No cloud. No tracking.** Your media stays on your network, 
 streamed from your pocket. This is UPnP Kino
 
----
-
 ## Features
 
 **Wide Format Support**: Video: `mp4` `mkv` `mov` `webm` — Audio: `mp3` `m4a` `aac` `flac` `wav` `opus`
