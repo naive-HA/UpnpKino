@@ -70,7 +70,7 @@ that break legacy apps
 - **Architecture**: arm64-v8a, armeabi-v7a, x86, x86_64
 
 ## Tested Players
-**VLC** (Desktop & Mobile), **eezUPnP**, **Kodi**
+**VLC** (desktop & mobile), **eezUPnP**, **Kodi**
 
 ## Permissions Explained
 
